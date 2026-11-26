@@ -164,7 +164,91 @@ static void test_handheld_navigation(void) {
     assert(pd_ui_map_control(&button, 2, 0, 0, false, false, true) == PD_MAP_OPEN_PLACES);
 }
 
+static void test_gameplay_and_center(void) {
+    struct pd_settings settings;
+    pd_settings_defaults(&settings);
+    struct pd_ui ui;
+    pd_ui_init(&ui, &settings);
+    ui.tab = PD_TAB_SETTINGS;
+    struct pd_game game = {0};
+    struct pd_snapshot snap = {.valid=true};
+    struct pd_host_info host = {.hasGameplayRows=true, .tmsSupported=1, .textSupported=true,
+        .tradeEvoSupported=true, .nuzlockeSupported=true};
+    struct pd_canvas canvas;
+    pd_canvas_init(&canvas, 426, 240, pixels);
+    pd_ui_draw(&ui, &canvas, &game, &snap, &host);
+    assert(has(&ui, HIT_SETTING+SETTING_REUSABLE_TMS));
+    assert(has(&ui, HIT_SETTING+SETTING_INSTANT_TEXT));
+    assert(has(&ui, HIT_SETTING+SETTING_TRADE_EVOS));
+    assert(has(&ui, HIT_SETTING+SETTING_NUZLOCKE));
+    assert(!has(&ui, HIT_SETTING+SETTING_GAME_SPEED) && !has(&ui, HIT_SETTING+SETTING_FF_MODE));
+    tap(&ui, HIT_SETTING+SETTING_REUSABLE_TMS);
+    assert(settings.reusableTms && pd_ui_take_action(&ui)==PD_ACTION_SETTINGS_CHANGED);
+    pd_ui_draw(&ui, &canvas, &game, &snap, &host);
+    tap(&ui, HIT_SETTING+SETTING_NUZLOCKE);
+    assert(pd_ui_take_action(&ui)==PD_ACTION_NUZLOCKE_TOGGLE);
+
+    uint8_t rom[0x500] = {0};
+    rom[4] = 0x00; rom[5] = 0x04; rom[6] = 0x00; rom[7] = 0x08;
+    rom[0x400] = 0x64; rom[0x401] = 0x02; // level 1, move 100
+    rom[0x402] = 0x0A; rom[0x403] = 0x02; // level 1, move 10 (already known)
+    rom[0x404] = 0xFF; rom[0x405] = 0xFF;
+    struct pd_config cfg = {.learnsets=0x08000000};
+    game = (struct pd_game){.rom=rom, .romSize=sizeof rom, .cfg=&cfg};
+    snap = (struct pd_snapshot){.valid=true, .partyCount=2};
+    snap.party[0].species=1;snap.party[0].level=5;snap.party[0].hp=10;snap.party[0].maxHp=10;
+    snap.party[0].moves[0]=10;snap.party[0].moves[1]=20;snap.party[0].personality=0x1234;
+    snap.party[1]=snap.party[0];snap.party[1].species=2;
+    host.centerServices=PD_CENTER_HEAL|PD_CENTER_NICKNAME|PD_CENTER_FORGET|PD_CENTER_RELEARN;
+    host.canTake=host.canSwitchParty=true;
+    ui = (struct pd_ui){0};pd_ui_init(&ui,&settings);ui.tab=PD_TAB_PARTY;ui.summarySlot=0;ui.boxMoves=true;
+    pd_canvas_init(&canvas,320,240,pixels);
+    pd_ui_draw(&ui,&canvas,&game,&snap,&host);
+    assert(has(&ui,HIT_SUMMARY_CENTER) && has(&ui,HIT_SUMMARY_SWITCH));
+    tap(&ui,HIT_SUMMARY_CENTER);assert(ui.overlay==PD_OVERLAY_CENTER);
+    pd_ui_draw(&ui,&canvas,&game,&snap,&host);
+    tap(&ui,HIT_OPTION+2);assert(ui.overlay==PD_OVERLAY_CENTER_FORGET);
+    pd_ui_draw(&ui,&canvas,&game,&snap,&host);
+    assert(ui.centerMoveCount==2);
+    tap(&ui,HIT_OPTION+1);assert(ui.overlay==PD_OVERLAY_CONFIRM_FORGET && ui.centerMove==1);
+    pd_ui_draw(&ui,&canvas,&game,&snap,&host);
+    tap(&ui,HIT_YES);assert(ui.overlay==PD_OVERLAY_NONE && pd_ui_take_action(&ui)==PD_ACTION_CENTER_FORGET);
+
+    pd_ui_draw(&ui,&canvas,&game,&snap,&host);
+    tap(&ui,HIT_SUMMARY_CENTER);pd_ui_draw(&ui,&canvas,&game,&snap,&host);
+    tap(&ui,HIT_OPTION);assert(ui.overlay==PD_OVERLAY_NONE && pd_ui_take_action(&ui)==PD_ACTION_CENTER_HEAL);
+
+    ui.focusId=HIT_SUMMARY_MON+1;
+    pd_ui_party_summary_control(&ui,&snap,0,1,false,false);
+    pd_ui_party_summary_control(&ui,&snap,0,1,false,false);
+    assert(ui.focusId != HIT_SUMMARY_MON+1);
+    ui.focusId=HIT_SUMMARY_CENTER;
+    pd_ui_party_summary_control(&ui,&snap,0,0,true,false);
+    assert(ui.overlay==PD_OVERLAY_CENTER);
+    assert(pd_ui_back(&ui));
+    ui.summarySlot=0;
+    ui.focusId=HIT_SUMMARY_SWITCH;
+    pd_ui_party_summary_control(&ui,&snap,0,0,true,false);
+    assert(ui.summarySwitching);
+    pd_ui_draw(&ui,&canvas,&game,&snap,&host);
+    ui.focusId=HIT_SLOT+1;
+    pd_ui_party_summary_control(&ui,&snap,0,0,true,false);
+    assert(!ui.summarySwitching && ui.switchFrom==0 && ui.switchTo==1);
+    assert(pd_ui_take_action(&ui)==PD_ACTION_PARTY_SWAP);
+    settings.tradeEvos=true;host.evolveTo[0]=65;
+    pd_ui_draw(&ui,&canvas,&game,&snap,&host);
+    ui.focusId=HIT_SUMMARY_EVOLVE;
+    pd_ui_party_summary_control(&ui,&snap,0,0,true,false);
+    assert(pd_ui_take_action(&ui)==PD_ACTION_TRADE_EVOLVE);
+    snap.party[0].stats.valid=true;ui.summaryStats=ui.summaryInfo=ui.summaryLearn=false;
+    pd_ui_draw(&ui,&canvas,&game,&snap,&host);
+    ui.focusId=HIT_SUMMARY_STATS;
+    pd_ui_party_summary_control(&ui,&snap,0,0,true,false);
+    assert(ui.summaryStats);
+}
+
 int main(void) {
+    test_gameplay_and_center();
     test_handheld_navigation();
     test_crystal_guide();
     test_dex_evolutions();

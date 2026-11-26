@@ -1,6 +1,6 @@
 /* A bare libretro frontend for testing pokedaisy_gbc_libretro on the desktop: scripted buttons, option values, frame dumps.
  *   pd_lr_host CORE ROM SAVEDIR [-o key=value]... [-p FRAME:BUTTON[:HOLD]]... [-d FRAME:FILE.ppm]... [-n FRAMES] [-R FRAME: unload and load again after it] [-s SAVE.srm]
- *   [-w FRAME:OFFSET:HEX] [-r FRAME:OFFSET:N] (system RAM poke / peek)
+ *   [-w FRAME:OFFSET:HEX] [-r FRAME:OFFSET:N] (system RAM poke / peek) [-m FRAME:RAM-BINARY]
  * BUTTON: a b select start right left up down r l x y l2 r2 l3. -r: write the frontend's view of the last frame size. */
 #define _GNU_SOURCE
 #include "libretro.h"
@@ -21,17 +21,24 @@ static struct { int frame; long off; char *hex; int n; } pokes[64];
 static int npoke;
 static struct { int frame; const char *file; } dumps[64];
 static int ndump;
+static struct { int frame; const char *file, *iwram; } images[8];
+static int nimage;
 static int frame, lastW, lastH;
 static uint16_t shot[1024 * 768];
 static const char *saveDir;
 
-static unsigned char *gbWram; // a Game Boy core's Color WRAM (its C000 memory descriptor): -w / -r go there
+static unsigned char *gbWram, *gbaWram, *gbaIwram; // the memory map's GB / GBA working RAM: -w / -r / -m go there
 static bool env(unsigned cmd, void *data) {
   if (cmd == RETRO_ENVIRONMENT_SET_MEMORY_MAPS) {
     const struct retro_memory_map *mm = data;
-    for (unsigned i = 0; i < mm->num_descriptors; i++)
+    for (unsigned i = 0; i < mm->num_descriptors; i++) {
       if (mm->descriptors[i].start == 0xC000 && mm->descriptors[i].ptr)
         gbWram = (unsigned char *)mm->descriptors[i].ptr + mm->descriptors[i].offset;
+      if (mm->descriptors[i].start == 0x02000000 && mm->descriptors[i].ptr)
+        gbaWram = (unsigned char *)mm->descriptors[i].ptr + mm->descriptors[i].offset;
+      if (mm->descriptors[i].start == 0x03000000 && mm->descriptors[i].ptr)
+        gbaIwram = (unsigned char *)mm->descriptors[i].ptr + mm->descriptors[i].offset;
+    }
   }
   switch (cmd) {
   case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: return *(int *)data == RETRO_PIXEL_FORMAT_RGB565;
@@ -111,6 +118,15 @@ int main(int argc, char **argv) {
       if (k < 0) return 2;
       presses[npress].frame = f; presses[npress].button = k; presses[npress++].hold = h;
     } else if (!strcmp(argv[i], "-d")) { char *c = strchr(argv[i + 1], ':'); *c = 0; dumps[ndump].frame = atoi(argv[i + 1]); dumps[ndump++].file = c + 1; }
+    else if (!strcmp(argv[i], "-m")) {
+      char *a = argv[i + 1], *c = strchr(a, ':'), *c2 = c ? strchr(c + 1, ':') : NULL;
+      if (!c) return 2;
+      *c = 0;
+      images[nimage].frame = atoi(a);
+      images[nimage].file = c + 1;
+      if (c2) { *c2 = 0; images[nimage].iwram = c2 + 1; }
+      nimage++;
+    }
     else if (!strcmp(argv[i], "-w") || !strcmp(argv[i], "-r")) {
       char *a = argv[i + 1], *c1 = strchr(a, ':'), *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
       if (!c2) return 2;
@@ -158,6 +174,18 @@ int main(int argc, char **argv) {
   fprintf(stderr, "av %ux%u fps %.2f\n", av.geometry.base_width, av.geometry.base_height, av.timing.fps);
   for (frame = 0; frame < frames; frame++) {
     retro_run_();
+    for (int i = 0; i < nimage; i++) if (images[i].frame == frame) {
+      unsigned char *m = retro_get_memory_data_(RETRO_MEMORY_SYSTEM_RAM);
+      size_t size = retro_get_memory_size_(RETRO_MEMORY_SYSTEM_RAM);
+      if (gbaWram) { m = gbaWram; size = 0x40000; }
+      FILE *in = fopen(images[i].file, "rb");
+      if (m && in) { size_t got = fread(m, 1, size, in); fprintf(stderr, "RAM image: %zu of %zu bytes\n", got, size); }
+      if (in) fclose(in);
+      if (images[i].iwram && gbaIwram) {
+        in = fopen(images[i].iwram, "rb");
+        if (in) { size_t got = fread(gbaIwram, 1, 0x8000, in); fprintf(stderr, "IRAM image: %zu of 32768 bytes\n", got); fclose(in); }
+      }
+    }
     for (int i = 0; i < ndump; i++) if (dumps[i].frame == frame) write_ppm(dumps[i].file);
     for (int i = 0; i < npoke; i++) {
       if (pokes[i].frame != frame) continue;

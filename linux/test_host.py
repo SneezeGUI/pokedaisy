@@ -122,9 +122,9 @@ with tempfile.TemporaryDirectory(prefix='pd-host-') as d:
     run(d,str(d/'roms/diagnostic.gb'),'--frames','80')
     del env['POCKET_KEYS']
     assert (d/'states/diagnostic.gb.ss').exists(),'SAVE STATE from the host menu wrote nothing'
-    # A/B BUTTONS (eight rows down from RESUME, past KEYBOARD) is saved with the host's settings.
-    env['POCKET_KEYS']='20:menu,'+','.join(f'{30+10*i}:down' for i in range(8))+',120:a'
-    run(d,str(d/'roms/diagnostic.gb'),'--frames','150')
+    # A/B BUTTONS follows the new controller, slot, undo and resume rows.
+    env['POCKET_KEYS']='20:menu,'+','.join(f'{30+10*i}:down' for i in range(13))+',170:a'
+    run(d,str(d/'roms/diagnostic.gb'),'--frames','200')
     del env['POCKET_KEYS']
     assert 'swap_ab=1' in (d/'host.ini').read_text(),(d/'host.ini').read_text()
     # HOTKEYS (three rows down): REWIND takes L3; SAVE STATE takes R2, which FAST FORWARD then loses.

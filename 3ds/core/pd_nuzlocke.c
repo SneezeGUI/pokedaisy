@@ -316,3 +316,32 @@ void pd_nuz_decode(struct pd_nuz_run* r, const char* text) {
         text = end ? end + 1 : NULL;
     }
 }
+
+bool pd_nuz_save_atomic(const char* path, bool on, const struct pd_nuz_run* run, pd_nuz_rename_fn renameFn) {
+    if (!path || !*path || !run || !renameFn) return false;
+    size_t textSize = 48 * 1024, pathSize = strlen(path) + 5;
+    char* text = malloc(textSize);
+    char* temp = malloc(pathSize);
+    if (!text || !temp) {
+        free(text);
+        free(temp);
+        return false;
+    }
+    snprintf(temp, pathSize, "%s.tmp", path);
+    bool ok = false;
+    int head = snprintf(text, textSize, "on\t%d\n", on ? 1 : 0);
+    if (head > 0 && (size_t) head < textSize) {
+        size_t n = pd_nuz_encode(run, text + head, textSize - (size_t) head);
+        if (n) {
+            FILE* f = fopen(temp, "w");
+            if (f) {
+                ok = fwrite(text, 1, (size_t) head + n, f) == (size_t) head + n;
+                ok = fclose(f) == 0 && ok;
+                if (ok) ok = renameFn(temp, path) == 0;
+            }
+        }
+    }
+    free(text);
+    free(temp);
+    return ok;
+}

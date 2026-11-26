@@ -4,9 +4,9 @@ Based on PokeDaisy by Lidor Itzhari - https://github.com/lidor30/pokedaisy
 
 The TrimUI Brick package puts three native libretro cores behind one collection.
 NXRedux chooses armGBA (`pokedaisy_gba`) for `.gba`, mGBA (`pokedaisy_gbc`) for `.gb` and `.gbc`, and DSperate
-(`pokedaisy_ds`) for `.nds`, using
-the ROM's original path for its save and resume keys. Extract archives before
-adding games.
+(`pokedaisy_ds`) for `.nds`, using the ROM's original path for its save and resume keys. The DS core comes from
+`linux/libretro-ds/`, separately from the older opt-in SDL-host experiment in `linux/dsperate/`.
+Extract archives before adding games.
 
 Extract the package at the SD root and put ROMs directly in
 `Roms/PokeDaisy (PDAI)/`. System subfolders are optional and existing nested
@@ -19,8 +19,8 @@ Use distinct ROM basenames across systems because NXRedux uses the collection
 tag and basename for SRAM filenames. To migrate from a different emulator
 tag, copy a raw battery save to the filename NXRedux creates under PDAI.
 Retain the original. Native states depend on the emulator and its version.
-The two cores store companion preferences separately under the frontend save
-directory in `pokedaisy/settings.ini` and `pokedaisy-ds/settings.ini`.
+The three cores use two companion-settings namespaces under the frontend save directory: GB/GBC and
+GBA share `pokedaisy/settings.ini`; DS uses `pokedaisy-ds/settings.ini`.
 
 ## Nintendo DS
 
@@ -56,7 +56,7 @@ Auto skips a frame's rendering only when the game is running late: NXRedux has
 no audio buffer report for the core to go by, so the DS core times its own
 frames (see the DS core's README). Reload the ROM after changing frameskip.
 
-### Companion navigation on both cores
+### Companion navigation on GB/GBA and DS
 
 Use L1/R1 to cycle the tab bar, including **More** when a card is hidden.
 The D-pad moves within the current tab. In Party, A opens the highlighted
@@ -307,3 +307,6 @@ python3 linux/libretro-unified/package.py build/gb/pokedaisy_gbc_libretro.so bui
 
 `--cores-only` makes the release's `pokedaisy-libretro-<arch>.zip` instead: the three cores and their notices in one
 folder named after the zip, no NXRedux launcher or ROM folder. CI's `linux.yml` builds both.
+
+For the full desktop three-core build, validation steps and current development limitations, see the
+[Linux desktop parity handoff](../../docs/LINUX_HANDOFF.md).

@@ -1,9 +1,15 @@
-# Optional Linux DS backend
+# Older opt-in Linux DS experiment
 
-DSperate adds Nintendo DS emulation to the SDL Linux host. It is opt-in:
-normal builds still use only mGBA for GB/GBC/GBA. The initial read-only
-companion is limited to the exact Platinum USA rev1 ROM already identified
-by the Android app. Other DS ROMs have emulation only, without a verified
+This directory contains the older opt-in DSperate backend for the SDL Linux host, enabled with
+`-DPOCKET_DSPERATE=ON`. It is not the DS core in current Linux packages. The current host loads three
+libretro cores: `pokedaisy_gba_libretro.so` (armGBA for GBA), `pokedaisy_gbc_libretro.so` (mGBA for
+GB/GBC) and `pokedaisy_ds_libretro.so` (DSperate for DS). The default DS core comes from
+[`linux/libretro-ds/`](../libretro-ds/README.md), not this experiment. See
+[linux/README.md](../README.md) for the current three-core host and the
+[Linux desktop parity handoff](../../docs/LINUX_HANDOFF.md) for full developer setup and verification.
+
+In this experiment, the initial read-only companion is limited to the exact Platinum USA rev1 ROM
+already identified by the Android app. Other DS ROMs have emulation only, without a verified
 companion or automatic battle-screen switching.
 
 This contribution is a foundation for upstream development. It includes
@@ -12,10 +18,11 @@ manual and automatic screen switching, a limited companion, the existing Linux
 quick menu and party HUD, and native/TrimUI CI. It deliberately omits expanded
 rendering, custom battle commands, and the experimental overlapping battle panel.
 
-## Build
+## Build the experiment
 
-Follow `linux/README.md` for SDL2, compiler and TrimUI SDK dependencies. DS also
-needs C++17. Initialize the pinned cores, then configure the optional backend:
+These commands build this older backend, not the current `pokedaisy_ds_libretro.so` core. Follow
+`linux/README.md` for SDL2, compiler and TrimUI SDK dependencies. DS also needs C++17. Initialize
+the pinned cores, then configure the optional backend:
 
 ```sh
 git submodule update --init third_party/mgba third_party/dsperate
@@ -59,9 +66,10 @@ switch summary info/moves, or page bag/dex lists. Map: D-pad moves over the
 full grid; A recenters on the player. The map is read-only; no Fly action.
 
 SET has SCREEN, AUTO-RESUME, BATTLES (OFF/AUTO) and HUD. Preferences are atomic
-writes to `DATA/ds-settings.ini`, separate from GBA settings. AUTO shows the
-native bottom screen while the battle waits for selection, and the top during
-animations. It does not replace game menus or independently perform actions.
+writes to `DATA/ds-settings.ini`. This experiment does not share that file with the current libretro
+cores: GB/GBC and GBA share `pokedaisy/settings.ini`, while DS uses `pokedaisy-ds/settings.ini`,
+both under the frontend's save directory. AUTO shows the native bottom screen while the battle waits
+for selection, and the top during animations. It does not replace game menus or independently perform actions.
 Old experimental `expand` preferences are ignored; old `battle=2` becomes AUTO.
 
 Keyboard: Z/X = A/B, S/A = X/Y, Q/E = L/R, Enter/Backspace = Start/Select,

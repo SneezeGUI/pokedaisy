@@ -1,8 +1,10 @@
 #include "pd_session.h"
 
 #include "../core/pd_games.h"
+#include "../core/pd_party.h"
 #include "../core/pd_tables.h"
 #include "../../linux/gb_field.h"
+#include "../../linux/pd_fs.h"
 #include "pd_mixer.h"
 #include "../emu/pd_armgba.h"
 #include "../emu/pd_gpsp.h"
@@ -461,22 +463,12 @@ static bool trade_evo_check(const struct pd_session* s);
 
 static char nuzText[48 * 1024];
 
+static int nuz_rename(const char* from, const char* to) {
+    return pd_rename(from, to);
+}
+
 static void nuz_save(struct pd_session* s) {
-    if (!s->nuzPath[0]) return;
-    int head = snprintf(nuzText, sizeof nuzText, "on\t%d\n", s->nuzOn ? 1 : 0);
-    size_t n = pd_nuz_encode(&s->nuz.run, nuzText + head, sizeof nuzText - (size_t) head);
-    if (!n) return;
-    char temp[310];
-    snprintf(temp, sizeof temp, "%s.tmp", s->nuzPath);
-    FILE* f = fopen(temp, "w");
-    if (!f) return;
-    bool ok = fwrite(nuzText, 1, (size_t) head + n, f) == (size_t) head + n;
-    ok = fclose(f) == 0 && ok;
-    if (ok) {
-        remove(s->nuzPath);
-        ok = rename(temp, s->nuzPath) == 0;
-    }
-    if (!ok) remove(temp);
+    if (s->nuzPath[0]) pd_nuz_save_atomic(s->nuzPath, s->nuzOn, &s->nuz.run, nuz_rename);
 }
 
 static void nuz_load(struct pd_session* s) {
@@ -1660,19 +1652,7 @@ static void swap_jobs(struct pd_session* s) {
         return;
     }
     const int stride = cfg && cfg->partyLayout ? cfg->partyLayout->size : pd_party_layout_vanilla.size;
-    uint8_t first[128], second[128], check[128];
-    if (!cfg || !cfg->playerParty || a == b || a < 0 || b < 0 || a >= count || b >= count || stride <= 0 || stride > 128) {
-        pd_session_show(s, "Couldn't switch");
-        return;
-    }
-    const uint32_t atA = cfg->playerParty + (uint32_t) (a * stride), atB = cfg->playerParty + (uint32_t) (b * stride);
-    bool ok = pd_session_read(s, atA, first, (size_t) stride) && pd_session_read(s, atB, second, (size_t) stride) &&
-              pd_session_write(s, atA, second, (size_t) stride) && pd_session_write(s, atB, first, (size_t) stride) &&
-              pd_session_read(s, atA, check, (size_t) stride) && !memcmp(check, second, (size_t) stride) &&
-              pd_session_read(s, atB, check, (size_t) stride) && !memcmp(check, first, (size_t) stride);
-    if (!ok) {
-        pd_session_write(s, atA, first, (size_t) stride);
-        pd_session_write(s, atB, second, (size_t) stride);
+    if (!cfg || !pd_party_swap_records(cfg->playerParty, stride, count, a, b, pd_session_read, pd_session_write, s)) {
         pd_session_show(s, "Couldn't switch");
         return;
     }

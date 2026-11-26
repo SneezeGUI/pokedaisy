@@ -67,7 +67,7 @@ jobs:
           cp "$RUNNER_TEMP/pd-gb/pokedaisy_gbc_libretro.so" "$RUNNER_TEMP/pd-gba/pokedaisy_gba_libretro.so" \
             "$RUNNER_TEMP/pd-ds/pokedaisy_ds_libretro.so" "$RUNNER_TEMP/cores/"
           cmake -S linux -B linux/build -DPOCKET_TEST_CORES="$RUNNER_TEMP/cores"
-          ctest --test-dir linux/build -R linux-host-test --output-on-failure
+          ctest --test-dir linux/build -R '^(linux-host-test|linux-host-features|linux-save-ui-test|linux-display-host-test)$' --output-on-failure
       - name: Package native artifact
         run: |
           python3 linux/package.py linux/build/pokedaisy-linux "$RUNNER_TEMP/linux-artifacts" \

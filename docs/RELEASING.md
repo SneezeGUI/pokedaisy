@@ -125,7 +125,7 @@ gh release upload v$V linux-v$V/*/*.zip
 
 | File | For |
 | --- | --- |
-| `pokedaisy-linux-x86_64.zip` | Steam Deck and desktop Linux (glibc 2.35 or newer): the executable and its two cores |
+| `pokedaisy-linux-x86_64.zip` | Steam Deck and desktop Linux (glibc 2.35 or newer): the executable and its three cores (GBA on armGBA, GB/GBC on mGBA, DS on DSperate) |
 | `pokedaisy-linux-aarch64.zip` | TrimUI devices, as an app |
 | `pokedaisy-portmaster-aarch64.zip` | PortMaster handhelds (`PokeDaisy.sh` + `pokedaisy/`) |
 | `pokedaisy-libretro-x86_64.zip`, `pokedaisy-libretro-aarch64.zip` | the three libretro cores (GBA on armGBA, GB/GBC on mGBA, DS on DSperate) and their licenses, for other frontends |

@@ -156,7 +156,7 @@ void pd_items_targets(struct mCore* core, const struct pd_config* cfg, int item,
 
 static bool still_there(struct mCore* core, int slot, uint32_t personality) {
     uint32_t p = 0, egg = 1;
-    return slot >= 0 && slot < core->busRead8(core, fns->partyCount) && get_mon(core, slot, MON_DATA_PERSONALITY, &p) &&
+    return slot >= 0 && slot < (int) core->busRead8(core, fns->partyCount) && get_mon(core, slot, MON_DATA_PERSONALITY, &p) &&
         p == personality && get_mon(core, slot, MON_DATA_IS_EGG + shift(), &egg) && !egg;
 }
 

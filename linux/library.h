@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "pd_canvas.h"
+#include "save_tools.h"
 
 enum {
   LIB_A = 1 << 0, LIB_B = 1 << 1, LIB_X = 1 << 2, LIB_Y = 1 << 3, LIB_L = 1 << 4, LIB_R = 1 << 5, LIB_UP = 1 << 6,
@@ -29,6 +30,8 @@ struct lib_host {
   void (*value)(int row, char *out, int len);
   void (*step)(int row, int dir); // dir: +1 / -1
   const char *version;
+  pd_linux_save_text edit_text;
+  void *edit_ctx;
 };
 
 /* A cover's place this frame: canvas pixels, the clip it's drawn within, its square of pixels (size x size). */
@@ -57,6 +60,8 @@ bool library_dimmed(void);
 const char *library_picked(void);
 /* The player closed the app. */
 bool library_quit(void);
+/* An open tool has unsaved changes and must answer before its session can be destroyed. */
+bool library_confirm_close(void);
 /* A game is playing: the background work (hashing, cover downloads) waits until it's false again. */
 void library_pause(bool paused);
 /* Back from a game: it's the last played, the cursor on it, its save looked for again. */

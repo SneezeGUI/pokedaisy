@@ -101,4 +101,8 @@ void pd_nuz_new_run(struct pd_nuz_run* r);
 size_t pd_nuz_encode(const struct pd_nuz_run* r, char* out, size_t len);
 void pd_nuz_decode(struct pd_nuz_run* r, const char* text);
 
+typedef int (*pd_nuz_rename_fn)(const char* from, const char* to);
+// Write path.tmp, then atomically replace path with renameFn. On failure the old file and the new temp are both kept.
+bool pd_nuz_save_atomic(const char* path, bool on, const struct pd_nuz_run* run, pd_nuz_rename_fn renameFn);
+
 #endif

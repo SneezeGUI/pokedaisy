@@ -33,7 +33,18 @@ target_include_directories(pd_puff PUBLIC ../third_party/zlib/contrib/puff)
 # SETTINGS > VERSION: the app's versionName.
 file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/../app/build.gradle.kts POCKET_VERSION_LINE REGEX "versionName = ")
 string(REGEX MATCH "\"[^\"]+\"" POCKET_VERSION "${POCKET_VERSION_LINE}")
-add_executable(PokeDaisy ../linux/main.c ../linux/library.c ../linux/cover_png.c ../3ds/desktop/pd_png.c ${PD_CORE} pokedaisy.rc)
+add_executable(PokeDaisy
+  ../linux/main.c
+  ../linux/library.c
+  ../linux/cover_png.c
+  ../linux/host_input.c
+  ../linux/host_state.c
+  ../linux/display_shader.c
+  ../linux/save_tools.c
+  ../linux/save_tools_ui.c
+  ../3ds/desktop/pd_png.c
+  ${PD_CORE}
+  pokedaisy.rc)
 target_include_directories(PokeDaisy PRIVATE
   ../3ds/core
   ../third_party/mgba/src/platform/libretro # libretro.h
@@ -49,7 +60,7 @@ if(MINGW)
   target_include_directories(PokeDaisy PRIVATE ../windows/include)
   target_compile_options(PokeDaisy PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/../windows/include/pd_win_compat.h)
 endif()
-target_link_libraries(PokeDaisy PRIVATE pd_puff ${SDL2_LIBRARY})
+target_link_libraries(PokeDaisy PRIVATE pd_puff ${SDL2_LIBRARY} m)
 set_target_properties(PokeDaisy PROPERTIES WIN32_EXECUTABLE OFF)
 
 # SDL2.dll has to sit beside the game's exe.

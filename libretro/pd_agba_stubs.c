@@ -62,6 +62,8 @@ const char *dolphinAddress(void) { return ""; }
 
 /* Polished Crystal (a Game Boy Color game): its PC and wild-encounter hooks work through the Game Boy adapter, and its wide
  * profile through pk_wide_gb.c, none of which are on this core. */
+const struct gb_field *gb_field_find(const uint8_t *rom, size_t len) { (void)rom; (void)len; return NULL; }
+bool polished_field_supported(const char *sha) { (void)sha; return false; }
 const char *polished_pc_reason(const char *sha, pd_read_fn read, void *ctx) {
   (void)sha; (void)read; (void)ctx;
   return "Not on this core";
