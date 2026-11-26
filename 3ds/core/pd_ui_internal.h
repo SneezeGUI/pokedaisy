@@ -61,6 +61,7 @@ enum {
     HIT_SUMMARY_SWITCH = 6184,
     HIT_SWITCH_CANCEL = 6185,
     HIT_SUMMARY_EVOLVE = 6186,
+    HIT_SUMMARY_CENTER = 6187,
     HIT_YES = 800,
     HIT_NO = 801,
     HIT_SCRIM = 802,
@@ -227,6 +228,10 @@ void ui_boxes_overlay(struct pd_ui* ui, struct pd_canvas* c);
 void ui_box_message(struct pd_ui* ui, struct pd_canvas* c);
 void ui_mon_summary(struct pd_ui* ui, struct pd_canvas* c, const struct pd_game* g, const struct pd_snapshot* s, const struct pd_mon* m,
                     const struct pd_mon* const* column, int columnCount, int shown, bool canTake, const char* pcLabel);
+void ui_center_overlay(struct pd_ui* ui, struct pd_canvas* c);
+bool ui_center_act(struct pd_ui* ui, int id);
+void ui_pick_list(struct pd_ui* ui, struct pd_canvas* c, const char* title, const char* const* options, int n, int current);
+void ui_confirm(struct pd_ui* ui, struct pd_canvas* c, const char* title, const char* text, const char* yes);
 void ui_overlay(struct pd_ui* ui, struct pd_canvas* c);
 // TAB BAR's / HUD's / MORE's rows: row i picked.
 void ui_toggle_act(struct pd_ui* ui, int i);

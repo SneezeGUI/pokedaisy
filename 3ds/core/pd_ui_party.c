@@ -1373,9 +1373,32 @@ static struct pd_summary_learn_row native_learn_row(const void* data, int i, cha
     return (struct pd_summary_learn_row){move.level, pd_move_name(source->game, move.move, scratch, n)};
 }
 
+static bool summary_action_focus(int id) {
+    return id == HIT_BACK || id == HIT_SUMMARY_TAKE || id == HIT_SUMMARY_PC || id == HIT_SUMMARY_STATS ||
+           id == HIT_SUMMARY_INFO || id == HIT_SUMMARY_CENTER || id == HIT_SUMMARY_EVOLVE || id == HIT_SUMMARY_SWITCH;
+}
+
 void pd_ui_party_summary_control(struct pd_ui* ui, const struct pd_snapshot* s, int dx, int dy,
                                  bool confirm, bool select) {
     if (ui->summarySlot < 0 || ui->summarySlot >= s->partyCount) return;
+    if (ui->summarySwitching) {
+        if (confirm) pd_ui_focus_press(ui);
+        else if (dx || dy) pd_ui_focus_move(ui, dy ? (dy > 0 ? 1 : 0) : dx > 0 ? 3 : 2);
+        return;
+    }
+    bool actionFocus = summary_action_focus(ui->focusId);
+    if (confirm && actionFocus) {
+        pd_ui_focus_press(ui);
+        return;
+    }
+    bool lastParty = dy > 0 && ui->summarySlot == s->partyCount - 1 &&
+        ((ui->focusId >= HIT_SLOT && ui->focusId < HIT_SLOT + s->partyCount) ||
+         (ui->focusId >= HIT_SUMMARY_MON && ui->focusId < HIT_SUMMARY_MON + s->partyCount));
+    if (lastParty) ui->focusId = HIT_SUMMARY_MON + s->partyCount - 1;
+    if ((dx || dy) && (actionFocus || lastParty)) {
+        pd_ui_focus_move(ui, dy ? (dy > 0 ? 1 : 0) : dx > 0 ? 3 : 2);
+        return;
+    }
     const int next = ui->summarySlot + (dy ? dy : ui->summaryLearn ? 0 : dx);
     if (next >= 0 && next < s->partyCount && next != ui->summarySlot) {
         ui->summarySlot = next;
@@ -1491,6 +1514,125 @@ static void summary_moves(const struct pd_ui* ui, struct pd_canvas* c, const str
     }
 }
 
+static bool center_relearnable(const struct pd_game* g, const struct pd_mon* m) {
+    struct pd_level_move moves[100];
+    int count = pd_dex_level_moves(g, m->species, moves, 100);
+    for (int i = 0; i < count; i++) {
+        if (moves[i].level > m->level || !moves[i].move) continue;
+        bool known = false, duplicate = false;
+        for (int k = 0; k < PD_NUM_MOVES; k++) known |= m->moves[k] == moves[i].move;
+        for (int k = 0; k < i && !duplicate; k++)
+            duplicate = moves[k].level <= m->level && moves[k].move == moves[i].move;
+        if (!known && !duplicate) return true;
+    }
+    return false;
+}
+
+static int center_options(struct pd_ui* ui, const char** labels, enum pd_action* actions) {
+    int n = 0;
+    if (ui->centerServices & PD_CENTER_HEAL) {
+        labels[n] = "HEAL THE PARTY";
+        actions[n++] = PD_ACTION_CENTER_HEAL;
+    }
+    const struct pd_mon* m = ui->drawn && ui->summarySlot >= 0 && ui->summarySlot < ui->drawn->partyCount
+        ? &ui->drawn->party[ui->summarySlot] : NULL;
+    if ((ui->centerServices & PD_CENTER_RELEARN) && m && center_relearnable(ui->drawnGame, m)) {
+        labels[n] = "RELEARN A MOVE";
+        actions[n++] = PD_ACTION_CENTER_RELEARN;
+    }
+    int known = 0;
+    if (m) for (int i = 0; i < PD_NUM_MOVES; i++) known += m->moves[i] != 0;
+    if ((ui->centerServices & PD_CENTER_FORGET) && known > 1) {
+        labels[n] = "FORGET A MOVE";
+        actions[n++] = PD_ACTION_CENTER_FORGET;
+    }
+    if (ui->centerServices & PD_CENTER_NICKNAME) {
+        labels[n] = "NICKNAME";
+        actions[n++] = PD_ACTION_CENTER_NICKNAME;
+    }
+    return n;
+}
+
+void ui_center_overlay(struct pd_ui* ui, struct pd_canvas* c) {
+    if (ui->overlay == PD_OVERLAY_CENTER) {
+        const char* labels[4];
+        enum pd_action actions[4];
+        int n = center_options(ui, labels, actions);
+        if (n) ui_pick_list(ui, c, "POKéMON CENTER", labels, n, 0);
+        return;
+    }
+    const struct pd_mon* m = ui->drawn && ui->summarySlot >= 0 && ui->summarySlot < ui->drawn->partyCount
+        ? &ui->drawn->party[ui->summarySlot] : NULL;
+    if (!m) return;
+    if (ui->overlay == PD_OVERLAY_CENTER_FORGET) {
+        const char* labels[PD_NUM_MOVES];
+        char names[PD_NUM_MOVES][40];
+        ui->centerMoveCount = 0;
+        for (int i = 0; i < PD_NUM_MOVES; i++) {
+            if (!m->moves[i]) continue;
+            int at = ui->centerMoveCount++;
+            ui->centerMoveSlots[at] = i;
+            labels[at] = pd_move_name(ui->drawnGame, m->moves[i], names[at], sizeof names[at]);
+        }
+        if (ui->centerMoveCount) ui_pick_list(ui, c, "FORGET A MOVE", labels, ui->centerMoveCount, 0);
+        return;
+    }
+    if (ui->centerMove < 0 || ui->centerMove >= PD_NUM_MOVES || !m->moves[ui->centerMove]) return;
+    char name[40], move[40], text[128];
+    snprintf(text, sizeof text, "%s forgets %s?", mon_display_name(ui, ui->drawnGame, m, name, sizeof name),
+             pd_move_name(ui->drawnGame, m->moves[ui->centerMove], move, sizeof move));
+    ui_confirm(ui, c, "FORGET A MOVE", text, "FORGET");
+}
+
+bool ui_center_act(struct pd_ui* ui, int id) {
+    if (ui->overlay == PD_OVERLAY_NONE && id == HIT_SUMMARY_CENTER && ui->centerServices) {
+        ui->overlay = PD_OVERLAY_CENTER;
+        return true;
+    }
+    if (ui->overlay == PD_OVERLAY_CENTER && id >= HIT_OPTION && id < HIT_OPTION + 4) {
+        const char* labels[4];
+        enum pd_action actions[4];
+        int n = center_options(ui, labels, actions), pick = id - HIT_OPTION;
+        if (pick < n) {
+            ui->overlay = pick >= 0 && actions[pick] == PD_ACTION_CENTER_FORGET ? PD_OVERLAY_CENTER_FORGET : PD_OVERLAY_NONE;
+            if (actions[pick] != PD_ACTION_CENTER_FORGET) ui->action = actions[pick];
+        }
+        return true;
+    }
+    if (ui->overlay == PD_OVERLAY_CENTER_FORGET && id >= HIT_OPTION && id < HIT_OPTION + PD_NUM_MOVES) {
+        int pick = id - HIT_OPTION;
+        if (pick >= 0 && pick < ui->centerMoveCount) {
+            ui->centerMove = ui->centerMoveSlots[pick];
+            ui->overlay = PD_OVERLAY_CONFIRM_FORGET;
+        }
+        return true;
+    }
+    if (ui->overlay == PD_OVERLAY_CONFIRM_FORGET && id == HIT_YES) {
+        ui->overlay = PD_OVERLAY_NONE;
+        ui->action = PD_ACTION_CENTER_FORGET;
+        return true;
+    }
+    if (ui->overlay == PD_OVERLAY_CONFIRM_FORGET && id == HIT_NO) {
+        ui->overlay = PD_OVERLAY_CENTER_FORGET;
+        return true;
+    }
+    if ((ui->overlay == PD_OVERLAY_CENTER || ui->overlay == PD_OVERLAY_CENTER_FORGET ||
+         ui->overlay == PD_OVERLAY_CONFIRM_FORGET) && (id == HIT_NO || id == HIT_SCRIM)) {
+        ui->overlay = PD_OVERLAY_NONE;
+        return true;
+    }
+    return ui->overlay == PD_OVERLAY_CENTER || ui->overlay == PD_OVERLAY_CENTER_FORGET ||
+           ui->overlay == PD_OVERLAY_CONFIRM_FORGET;
+}
+
+static void summary_button_wrap(int rows, int colX, int btnH, int* bx, int* by, bool* wrapped, int width) {
+    if (rows == 2 && !*wrapped && *bx + width > colX - 3) {
+        *bx = MARGIN;
+        *by += btnH + 3;
+        *wrapped = true;
+    }
+}
+
 // The summary (MonDetailScreen): one white window split by a rule - the Pokémon left, its moves (or STATS) right -
 // beside a column of the party with Back under it.
 // The summary of [m]; [column] is who the column on the right shows, [shown] the framed one. [pcLabel]: the PC's button.
@@ -1498,7 +1640,9 @@ void ui_mon_summary(struct pd_ui* ui, struct pd_canvas* c, const struct pd_game*
                     const struct pd_mon* const* column, int columnCount, int shown, bool canTake, const char* pcLabel) {
     (void) s;
     char buf[40];
-    int x = MARGIN, y = CONTENT_Y - 2, btnH = 26, full = c->h - y - 2, h = full - btnH - 3;
+    int x = MARGIN, y = CONTENT_Y - 2, btnH = 26, full = c->h - y - 2;
+    int buttonRows = ui->centerServices && (ui->summaryCanSwitch || ui->summaryEvolve) ? 2 : 1;
+    int h = full - btnH * buttonRows - 3;
     int colX = c->w - MARGIN - SUMMARY_COLUMN, w = colX - 3 - x;
     int f = pd_title_box(c, x, y, w, h, PD_TITLE_FILL);
     int ix = x + f + 4, iy = y + f + 2, iw = w - 2 * (f + 4), ih = h - 2 * (f + 2);
@@ -1575,7 +1719,7 @@ void ui_mon_summary(struct pd_ui* ui, struct pd_canvas* c, const struct pd_game*
         }
     }
 
-    // The party beside the window, the shown one framed red; under them a row of buttons, Back at its right end.
+    // The party beside the window, the shown one framed red; up to two rows of buttons, Back at its right end.
     int cell = SUMMARY_COLUMN, rows = columnCount;
     if (rows * (cell + 1) > h) cell = h / rows - 1;
     for (int i = 0; i < columnCount; i++) {
@@ -1588,9 +1732,10 @@ void ui_mon_summary(struct pd_ui* ui, struct pd_canvas* c, const struct pd_game*
         pd_unclip(c);
         ui_add_hit(ui, colX, cy, SUMMARY_COLUMN, cell, HIT_SUMMARY_MON + i);
     }
-    int by = y + full - btnH, bx = x;
-    ui_platinum(ui, c, colX, by, SUMMARY_COLUMN, btnH, 0x4890D8, 0x2860A0, HIT_BACK);
-    ui_platinum_back(c, colX, by, SUMMARY_COLUMN, btnH);
+    int by = y + full - btnH * buttonRows, bx = x;
+    bool wrapped = false;
+    ui_platinum(ui, c, colX, y + full - btnH, SUMMARY_COLUMN, btnH, 0x4890D8, 0x2860A0, HIT_BACK);
+    ui_platinum_back(c, colX, y + full - btnH, SUMMARY_COLUMN, btnH);
     if (pcLabel) {
         int bw = pd_text_width(pcLabel) + 16;
         ui_platinum(ui, c, bx, by, bw, btnH, 0x58A840, 0x307020, HIT_SUMMARY_PC);
@@ -1612,9 +1757,19 @@ void ui_mon_summary(struct pd_ui* ui, struct pd_canvas* c, const struct pd_game*
         ui_platinum_label(c, bx, by, bw, btnH, label);
         bx += bw + 3;
     }
+    if (ui->centerServices && ui->tab == PD_TAB_PARTY) {
+        int bw = pd_text_width(pd_tr("CENTER")) + 16;
+        summary_button_wrap(buttonRows, colX, btnH, &bx, &by, &wrapped, bw);
+        if (bx + bw <= colX - 3) {
+            ui_platinum(ui, c, bx, by, bw, btnH, 0xE8687C, 0xB03850, HIT_SUMMARY_CENTER);
+            ui_platinum_label(c, bx, by, bw, btnH, "CENTER");
+            bx += bw + 3;
+        }
+    }
     // EVOLVE (TRADE EVOS, MonDetailScreen's): a Pokémon that evolves by trading evolves here, through the game's own scene.
     if (ui->summaryEvolve && ui->tab == PD_TAB_PARTY) {
         int bw = pd_text_width(pd_tr("EVOLVE")) + 16;
+        summary_button_wrap(buttonRows, colX, btnH, &bx, &by, &wrapped, bw);
         if (bx + bw <= colX - 3) {
             ui_platinum(ui, c, bx, by, bw, btnH, 0xE07828, 0xA04C10, HIT_SUMMARY_EVOLVE);
             ui_platinum_label(c, bx, by, bw, btnH, "EVOLVE");
@@ -1624,6 +1779,7 @@ void ui_mon_summary(struct pd_ui* ui, struct pd_canvas* c, const struct pd_game*
     // SWITCH (MonDetailScreen's, RunBlue): trade places with another party Pokemon, on the field.
     if (ui->summaryCanSwitch && ui->tab == PD_TAB_PARTY) {
         int bw = pd_text_width(pd_tr("SWITCH")) + 16;
+        summary_button_wrap(buttonRows, colX, btnH, &bx, &by, &wrapped, bw);
         if (bx + bw <= colX - 3) {
             ui_platinum(ui, c, bx, by, bw, btnH, 0x3870C8, 0x204890, HIT_SUMMARY_SWITCH);
             ui_platinum_label(c, bx, by, bw, btnH, "SWITCH");
@@ -1644,6 +1800,9 @@ void ui_party_tab(struct pd_ui* ui, struct pd_canvas* c, const struct pd_game* g
     ui->summaryCanSwitch = host && host->canSwitchParty && s->partyCount > 1 && !s->inBattle;
     ui->summaryEvolve = host && host->tradeEvoSupported && ui->settings && ui->settings->tradeEvos && !s->inBattle &&
                         ui->summarySlot >= 0 && ui->summarySlot < 6 && host->evolveTo[ui->summarySlot] > 0;
+    const struct pd_mon* summaryMon = ui->summarySlot >= 0 && ui->summarySlot < s->partyCount ? &s->party[ui->summarySlot] : NULL;
+    ui->centerServices = host && summaryMon && summaryMon->personality && !party_egg(ui, summaryMon) && !s->inBattle
+        ? host->centerServices : 0;
     if (!ui->summaryCanSwitch || ui->summarySlot < 0) ui->summarySwitching = false;
     if (ui->summarySwitching) {
         // SWITCH (MonDetailScreen's): the party in the summary's place, a window under it saying what to do, CANCEL.
@@ -1658,7 +1817,7 @@ void ui_party_tab(struct pd_ui* ui, struct pd_canvas* c, const struct pd_game* g
         return;
     }
     if (ui->summarySlot >= 0) {
-        if (ui->handheldParty && !ui->boxMoves && !(host && host->canTake)) {
+        if (ui->handheldParty && !ui->boxMoves && !(host && (host->canTake || host->canSwitchParty || host->centerServices))) {
             native_summary_view(ui, c, g, s);
             return;
         }

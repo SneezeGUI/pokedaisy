@@ -7,8 +7,10 @@
 #include "libretro.h"
 #include "../3ds/desktop/pd_png.h"
 #include "display_filter.h"
+#include "display_shader.h"
 #include "pd_canvas.h"
 #include "pd_menu.h"
+#include "pd_style.h"
 #include <SDL.h>
 #include <dirent.h>
 #ifdef _WIN32
@@ -32,6 +34,8 @@
 #include "pd_env.h"
 
 #include "library.h"
+#include "host_input.h"
+#include "host_state.h"
 
 /* The cores' file ending: dlopen'd .so objects on Linux, .dll on Windows. */
 #ifdef _WIN32
@@ -62,6 +66,7 @@ static const char *root = ".";
 /* plorpOS: --save FILE, the battery save another emulator keeps (its backups then go to DATA/backups);
  * NULL = DATA/saves/ROM.sav, or the save named after the ROM without its extension. */
 static const char *saveFile;
+static const char *importFile; // --import-save / --restore-save, applied after the pre-open backup
 static char savesDir[PATH_MAX], exeDir[PATH_MAX];
 static char message[128];
 static unsigned messageUntil;
@@ -120,10 +125,14 @@ enum {
   P2,
   P3,
   P4,
-  FFKEY, // the keyboard's own: fast-forward held, rewind held, save / load state
+  FFKEY, // direct host actions: speed, rewind, states, undo and slot selection
   RWKEY,
   SAVEKEY,
   LOADKEY,
+  UNSAVEKEY,
+  UNLOADKEY,
+  NEXTKEY,
+  PREVKEY,
   NKEYS
 };
 static SDL_GameController *controller;
@@ -141,42 +150,34 @@ static int face(int k) {
     return k;
   return k == A ? B : k == B ? A : k == X ? Y : k == Y ? X : k;
 }
-static unsigned held, pressed;
+static uint64_t held, pressed;
 static bool inputReset;
 static unsigned repeatAt[NKEYS];
-/* The keyboard's keys, one per action: the host menu's KEYBOARD page sets them, kept in host.ini (kb_*). A floor of a
- * keyboard can't follow a game pad's layout, so each action has its own key. SDL keycodes; SDLK_UNKNOWN = the row is off. */
-enum {
-  KB_A, KB_B, KB_X, KB_Y, KB_L, KB_R, KB_L2, KB_R2, KB_START, KB_SELECT,
-  KB_UP, KB_DOWN, KB_LEFT, KB_RIGHT, KB_MENU, KB_FF, KB_REWIND, KB_SAVE, KB_LOAD, KB_COUNT
-};
-static const char *const kbIds[KB_COUNT] = {"a",      "b",     "x",      "y",    "l1", "r1",     "l2",     "r2",
-                                            "start",  "select", "up",    "down", "left", "right", "menu", "ff",
-                                            "rewind", "savestate", "loadstate"};
-static const char *const kbLabels[KB_COUNT] = {"A",   "B",   "X",     "Y",    "L1",   "R1",     "L2",    "R2",
-                                               "START", "SELECT", "UP", "DOWN", "LEFT", "RIGHT", "MENU",
-                                               "FAST FORWARD", "REWIND", "SAVE STATE", "LOAD STATE"};
-static const int kbTargets[KB_COUNT] = {A,    B,    X,   Y,    L,      R,      L2,     R2,      START,   SELECT,
-                                        UP,   DOWN, LEFT, RIGHT, MENU,  FFKEY,  RWKEY,  SAVEKEY, LOADKEY};
-static int kbKeys[KB_COUNT] = {SDLK_z,   SDLK_x,       SDLK_TAB,  SDLK_f,     SDLK_q,     SDLK_e,   SDLK_1,
-                               SDLK_2,   SDLK_RETURN,  SDLK_BACKSPACE, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT,
-                               SDLK_ESCAPE, SDLK_SPACE, SDLK_r,   SDLK_F2,    SDLK_F4};
-static int kbCapture = -1; // the KEYBOARD page's row waiting for a key, -1 none
-static int lastKey;        // the key that went down this frame (that page reads it)
+/* One logical action per keyboard row and controller control. The old key names and defaults remain valid; L3/R3,
+ * undo and slot selection are new rows. The left stick stays a second D-pad, independent of the button map. */
+#define KB_COUNT PD_ACT_REMAP_COUNT
+static const int actionTargets[PD_ACT_COUNT] = {
+    A, B, X, Y, L, R, L2, R2, L3, R3, START, SELECT, UP, DOWN, LEFT, RIGHT, MENU, FFKEY, RWKEY, SAVEKEY, LOADKEY,
+    UNSAVEKEY, UNLOADKEY, NEXTKEY, PREVKEY, P1, P2, P3, P4};
+static int kbKeys[KB_COUNT] = {
+    SDLK_z, SDLK_x, SDLK_TAB, SDLK_f, SDLK_q, SDLK_e, SDLK_1, SDLK_2, SDLK_3, SDLK_4, SDLK_RETURN,
+    SDLK_BACKSPACE, SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT, SDLK_ESCAPE, SDLK_SPACE, SDLK_r, SDLK_F2,
+    SDLK_F4, SDLK_F3, SDLK_F6, SDLK_RIGHTBRACKET, SDLK_LEFTBRACKET};
+static int kbCapture = -1;
+static int lastKey;
 static int keyboard(SDL_Keycode k) {
   for (int i = 0; i < KB_COUNT; i++)
     if (kbKeys[i] && kbKeys[i] == (int)k)
-      return kbTargets[i];
+      return actionTargets[i];
   return -1;
 }
-/* The KEYBOARD page: the in-game host menu's and the game list's SETTINGS page, one list of the same keys. */
-static char kbRows[KB_COUNT][48];
+static char kbRows[KB_COUNT][56];
 static const char *kbPtrs[KB_COUNT];
 static struct pd_menu kbMenu;
 static void kb_menu_build(void) {
   for (int i = 0; i < KB_COUNT; i++) {
     const char *name = kbKeys[i] ? SDL_GetKeyName((SDL_Keycode)kbKeys[i]) : "OFF";
-    snprintf(kbRows[i], sizeof kbRows[i], "%s  %s", kbLabels[i], kbCapture == i ? "..." : name);
+    snprintf(kbRows[i], sizeof kbRows[i], "%s  %s", pd_pad_action_label(i), kbCapture == i ? "..." : name);
     kbPtrs[i] = kbRows[i];
   }
 }
@@ -185,66 +186,32 @@ static void kb_menu_open(void) {
   pd_menu_init(&kbMenu, "KEYBOARD", kbPtrs, KB_COUNT);
   kbMenu.overlay = true;
 }
-/* POCKET_FACE_LABELS=1: the controller mapping already names the face buttons by their labels (ROCKNIX's PortMaster mapping in
- * its Nintendo layout: SDL's "a" is the button marked A, wherever it sits), so A is A. Else SDL's are an Xbox pad's places
- * (A at the bottom) and the game's follow the GBA's: the bottom one is B, the right one A. */
+/* POCKET_FACE_LABELS=1 keeps SDL's face labels; otherwise positions follow a Nintendo pad. A/B BUTTONS is still a
+ * compatibility swap after this map, so existing host.ini files behave as they did. */
 static bool faceLabels;
-static int controller_button(int button) {
-  if (faceLabels)
-    switch (button) {
-    case SDL_CONTROLLER_BUTTON_A:
-      return A;
-    case SDL_CONTROLLER_BUTTON_B:
-      return B;
-    case SDL_CONTROLLER_BUTTON_X:
-      return X;
-    case SDL_CONTROLLER_BUTTON_Y:
-      return Y;
-    default:
-      break;
-    }
-  switch (button) {
-  case SDL_CONTROLLER_BUTTON_A:
-    return B;
-  case SDL_CONTROLLER_BUTTON_B:
-    return A;
-  case SDL_CONTROLLER_BUTTON_X:
-    return Y;
-  case SDL_CONTROLLER_BUTTON_Y:
-    return X;
-  case SDL_CONTROLLER_BUTTON_BACK:
-    return SELECT;
-  case SDL_CONTROLLER_BUTTON_START:
-    return START;
-  case SDL_CONTROLLER_BUTTON_GUIDE:
-    return MENU;
-  case SDL_CONTROLLER_BUTTON_LEFTSTICK:
-    return L3;
-  case SDL_CONTROLLER_BUTTON_RIGHTSTICK:
-    return R3;
-  case SDL_CONTROLLER_BUTTON_PADDLE1:
-    return P1;
-  case SDL_CONTROLLER_BUTTON_PADDLE2:
-    return P2;
-  case SDL_CONTROLLER_BUTTON_PADDLE3:
-    return P3;
-  case SDL_CONTROLLER_BUTTON_PADDLE4:
-    return P4;
-  case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
-    return L;
-  case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
-    return R;
-  case SDL_CONTROLLER_BUTTON_DPAD_UP:
-    return UP;
-  case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-    return DOWN;
-  case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-    return LEFT;
-  case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-    return RIGHT;
-  default:
-    return -1;
+static struct pd_pad_map padMap;
+static int padCapture = -1, lastPadControl = -1;
+static char padRows[PD_ACT_REMAP_COUNT][64];
+static const char *padPtrs[PD_ACT_REMAP_COUNT];
+static struct pd_menu padMenu;
+static void pad_menu_build(void) {
+  for (int i = 0; i < PD_ACT_REMAP_COUNT; i++) {
+    char name[40];
+    pd_pad_control_label(pd_pad_control_for(&padMap, i), name, sizeof name);
+    snprintf(padRows[i], sizeof padRows[i], "%s  %s", pd_pad_action_label(i), padCapture == i ? "..." : name);
+    padPtrs[i] = padRows[i];
   }
+}
+static void pad_menu_open(void) {
+  pad_menu_build();
+  pd_menu_init(&padMenu, "CONTROLLER", padPtrs, PD_ACT_REMAP_COUNT);
+  padMenu.overlay = true;
+}
+static void key(int k, bool isDown);
+static void pad_control(int control, bool isDown) {
+  int action = pd_pad_action(&padMap, control);
+  if (action >= 0)
+    key(face(actionTargets[action]), isDown);
 }
 static int joy(int n) {
   static const int map[] = {B, A, Y, X, L, R, SELECT, START, MENU, -1, L2, R2};
@@ -254,19 +221,20 @@ static int joy(int n) {
  * held while the other still has it. */
 static unsigned padHeld;  // directions the D-pad, keyboard or hat hold
 static bool fromStick;    // key() called by stick_dir
+static void input_mapping_reset(void) { held = pressed = padHeld = 0; }
 static int stick_of(int dir) { return dir == UP ? SUP : dir == DOWN ? SDOWN : dir == LEFT ? SLEFT : dir == RIGHT ? SRIGHT : -1; }
 static void key(int k, bool isDown) {
   if (k < 0)
     return;
-  unsigned bit = 1u << k;
+  uint64_t bit = 1ull << k;
   int stick = stick_of(k);
   if (stick >= 0) {
     if (fromStick) {
       if (!isDown && (padHeld & bit))
         return; // the D-pad still holds it
     } else {
-      padHeld = isDown ? padHeld | bit : padHeld & ~bit;
-      if (!isDown && (held & (1u << stick)))
+      padHeld = isDown ? padHeld | (unsigned)bit : padHeld & ~(unsigned)bit;
+      if (!isDown && (held & (1ull << stick)))
         return; // the stick still holds it
     }
   }
@@ -278,6 +246,8 @@ static void key(int k, bool isDown) {
     held |= bit;
   } else
     held &= ~bit;
+  if (stick_of(k) >= 0 && getenv("POCKET_INPUT_DEBUG"))
+    fprintf(stderr, "Input: padHeld=%x held=%llx\n", padHeld, (unsigned long long)held);
 }
 /* The left stick is the D-pad too, but only when it crosses the threshold: a stick at rest still sends small axis
  * events (the Steam Deck's, all the time), and releasing the direction on each of them let go of a held D-pad. */
@@ -315,7 +285,7 @@ static void controller_removed(SDL_JoystickID id) {
   SDL_GameControllerClose(controller);
   controller = NULL;
   inputReset = true;
-  held = 0; // nothing stays pressed on a pad that's gone
+  held = padHeld = 0; // nothing stays pressed on a pad that's gone
   for (int i = 0; i < SDL_NumJoysticks() && !controller; i++)
     if (SDL_IsGameController(i))
       controller_added(i);
@@ -351,6 +321,40 @@ static void pointer_at(int x, int y) {
   pointerY = py < -0x7FFF ? -0x7FFF : py > 0x7FFF ? 0x7FFF : py;
 }
 static bool audioLost, outputChanged;
+static struct {
+  bool active, accepted;
+  int max;
+  char hint[64], text[64];
+} textPrompt;
+static int textScript = -1;
+static int text_characters(const char *text) {
+  int count = 0;
+  for (const unsigned char *p = (const unsigned char *)text; *p; p++)
+    count += (*p & 0xC0) != 0x80;
+  return count;
+}
+static void script_text(void) {
+  if (!textPrompt.active || textScript >= 0)
+    return;
+  const char *text = getenv("POCKET_TEXT");
+  bool cancel = getenv("POCKET_TEXT_CANCEL") != NULL;
+  if (!text && !cancel)
+    return;
+  textScript = 0;
+  if (text) {
+    SDL_Event e = {0};
+    e.type = SDL_TEXTINPUT;
+    e.text.type = SDL_TEXTINPUT;
+    snprintf(e.text.text, sizeof e.text.text, "%s", text);
+    SDL_PushEvent(&e);
+  }
+  SDL_Event e = {0};
+  e.type = SDL_KEYDOWN;
+  e.key.type = SDL_KEYDOWN;
+  e.key.state = SDL_PRESSED;
+  e.key.keysym.sym = cancel ? SDLK_ESCAPE : SDLK_RETURN;
+  SDL_PushEvent(&e);
+}
 static int key_named(const char *s);
 /* POCKET_KEYS="TICK:KEY[:HOLD],...": presses scripted by loop tick (each events() call), held HOLD ticks (2), for
  * tests: KEY is a key name (a, b, up, menu, start, l3, r2 ...: keyNames). */
@@ -411,12 +415,136 @@ static void script_rawkeys(void) {
     }
   }
 }
+/* POCKET_PAD="TICK:CONTROL[:HOLD]": real SDL controller button / trigger events for remapping tests. */
+static struct {
+  unsigned at, hold;
+  int control;
+} padscript[16];
+static int padscriptN = -1;
+static void script_rawpads(void) {
+  if (padscriptN < 0) {
+    padscriptN = 0;
+    char buf[256], *save = NULL;
+    snprintf(buf, sizeof buf, "%s", getenv("POCKET_PAD") ? getenv("POCKET_PAD") : "");
+    for (char *t = strtok_r(buf, ",", &save); t && padscriptN < 16; t = strtok_r(NULL, ",", &save)) {
+      unsigned at, hold = 2;
+      int control;
+      if (sscanf(t, "%u:%d:%u", &at, &control, &hold) >= 2 && pd_pad_control_valid(control))
+        padscript[padscriptN++] = (typeof(padscript[0])){at, hold, control};
+    }
+  }
+  for (int i = 0; i < padscriptN; i++)
+    if (tick == padscript[i].at || tick == padscript[i].at + padscript[i].hold) {
+      bool downNow = tick == padscript[i].at;
+      SDL_Event e = {0};
+      if (padscript[i].control < SDL_CONTROLLER_BUTTON_MAX) {
+        e.type = downNow ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;
+        e.cbutton.type = e.type;
+        e.cbutton.state = downNow ? SDL_PRESSED : SDL_RELEASED;
+        e.cbutton.button = (Uint8)padscript[i].control;
+      } else {
+        e.type = SDL_CONTROLLERAXISMOTION;
+        e.caxis.type = e.type;
+        e.caxis.axis = (Uint8)(padscript[i].control == PD_PAD_TRIGGER_LEFT ? SDL_CONTROLLER_AXIS_TRIGGERLEFT
+                                                                          : SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+        e.caxis.value = downNow ? 32767 : 0;
+      }
+      SDL_PushEvent(&e);
+    }
+}
+/* POCKET_STICK="TICK:AXIS:VALUE:HOLD" and POCKET_CLOSE="TICK": focused SDL input/window-event fixtures. */
+static struct {
+  unsigned at, hold;
+  int axis, value;
+} stickScript[8];
+static int stickScriptN = -1, closeAt = -2;
+static void script_stick_close(void) {
+  if (stickScriptN < 0) {
+    stickScriptN = 0;
+    char buf[256], *save = NULL;
+    snprintf(buf, sizeof buf, "%s", getenv("POCKET_STICK") ? getenv("POCKET_STICK") : "");
+    for (char *t = strtok_r(buf, ",", &save); t && stickScriptN < 8; t = strtok_r(NULL, ",", &save)) {
+      unsigned at, hold;
+      int axis, value;
+      if (sscanf(t, "%u:%d:%d:%u", &at, &axis, &value, &hold) == 4)
+        stickScript[stickScriptN++] = (typeof(stickScript[0])){at, hold, axis, value};
+    }
+    if (getenv("POCKET_CLOSE"))
+      closeAt = atoi(getenv("POCKET_CLOSE"));
+  }
+  for (int i = 0; i < stickScriptN; i++)
+    if (tick == stickScript[i].at || tick == stickScript[i].at + stickScript[i].hold) {
+      SDL_Event e = {0};
+      e.type = SDL_CONTROLLERAXISMOTION;
+      e.caxis.type = e.type;
+      e.caxis.axis = (Uint8)stickScript[i].axis;
+      e.caxis.value = (Sint16)(tick == stickScript[i].at ? stickScript[i].value : 0);
+      SDL_PushEvent(&e);
+    }
+  if (closeAt >= 0 && (unsigned)closeAt == tick) {
+    SDL_Event e = {0};
+    e.type = SDL_QUIT;
+    SDL_PushEvent(&e);
+    closeAt = -1;
+  }
+}
 static void events(void) {
   pressed = 0;
   lastKey = 0;
-  script_rawkeys();
+  lastPadControl = -1;
+  script_stick_close();
+  bool modal = textPrompt.active;
+  if (modal)
+    script_text();
+  else {
+    script_rawkeys();
+    script_rawpads();
+  }
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
+    if (e.type == SDL_QUIT) {
+      if (library_confirm_close()) {
+        textPrompt.active = false;
+        continue;
+      }
+      running = 0;
+      if (modal)
+        textPrompt.active = false;
+      continue;
+    }
+    if (modal) {
+      if (e.type == SDL_QUIT) {
+        running = 0;
+        textPrompt.active = false;
+      } else if (e.type == SDL_TEXTINPUT) {
+        size_t used = strlen(textPrompt.text), add = strlen(e.text.text);
+        if (used + add < sizeof textPrompt.text && text_characters(textPrompt.text) + text_characters(e.text.text) <= textPrompt.max)
+          memcpy(textPrompt.text + used, e.text.text, add + 1);
+      } else if (e.type == SDL_KEYDOWN) {
+        if (e.key.keysym.sym == SDLK_RETURN || e.key.keysym.sym == SDLK_KP_ENTER) {
+          textPrompt.accepted = textPrompt.text[0] != 0;
+          textPrompt.active = false;
+        } else if (e.key.keysym.sym == SDLK_ESCAPE)
+          textPrompt.active = false;
+        else if (e.key.keysym.sym == SDLK_BACKSPACE) {
+          size_t n = strlen(textPrompt.text);
+          if (n) {
+            n--;
+            while (n && (((unsigned char)textPrompt.text[n] & 0xC0) == 0x80))
+              n--;
+            textPrompt.text[n] = 0;
+          }
+        } else if (e.key.keysym.sym == SDLK_DELETE)
+          textPrompt.text[0] = 0;
+      } else if (e.type == SDL_CONTROLLERBUTTONDOWN) {
+        if (e.cbutton.button == SDL_CONTROLLER_BUTTON_A || e.cbutton.button == SDL_CONTROLLER_BUTTON_START) {
+          textPrompt.accepted = textPrompt.text[0] != 0;
+          textPrompt.active = false;
+        } else if (e.cbutton.button == SDL_CONTROLLER_BUTTON_B || e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK)
+          textPrompt.active = false;
+      }
+      continue;
+    }
     if (e.type == SDL_QUIT)
       running = 0;
     if (e.type == SDL_JOYDEVICEADDED && !SDL_IsGameController(e.jdevice.which))
@@ -431,13 +559,20 @@ static void events(void) {
       lastKey = (int)e.key.keysym.sym; // the KEYBOARD page's next key: the game sees nothing of it
     else if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && !e.key.repeat)
       key(keyboard(e.key.keysym.sym), e.type == SDL_KEYDOWN);
-    if (e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP)
-      key(face(controller_button(e.cbutton.button)), e.type == SDL_CONTROLLERBUTTONDOWN);
+    if (e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP) {
+      int control = pd_pad_button_control(e.cbutton.button);
+      if (e.type == SDL_CONTROLLERBUTTONDOWN && padCapture >= 0)
+        lastPadControl = control;
+      pad_control(control, e.type == SDL_CONTROLLERBUTTONDOWN);
+    }
     if (e.type == SDL_CONTROLLERAXISMOTION) {
-      if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT)
-        key(L2, e.caxis.value > 16000);
-      if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
-        key(R2, e.caxis.value > 16000);
+      int trigger = pd_pad_axis_control(e.caxis.axis);
+      if (trigger >= 0) {
+        bool on = e.caxis.value > 16000;
+        if (on && padCapture >= 0)
+          lastPadControl = trigger;
+        pad_control(trigger, on);
+      }
       if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
         stick_dir(SLEFT, LEFT, e.caxis.value < -16000);
         stick_dir(SRIGHT, RIGHT, e.caxis.value > 16000);
@@ -489,7 +624,7 @@ static void events(void) {
     }
     if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
       inputReset = true;
-      held = pressed = 0;
+      held = pressed = padHeld = 0;
       pointerHeld = false; // its button-up may go to the window that took the focus
       pointerPulse = 0;
       pointerDown = false;
@@ -499,9 +634,13 @@ static void events(void) {
     if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
       outputChanged = true;
   }
-  script_mouse();
-  script_resize();
-  script_keys();
+  if (modal)
+    tick++;
+  else {
+    script_mouse();
+    script_resize();
+    script_keys();
+  }
 }
 /* POCKET_MOUSE="TICK:X:Y[:c],...": where the cursor is (window pixels) from that tick on, ',c' clicking then, for
  * tests; the same tick numbering as POCKET_KEYS. */
@@ -563,17 +702,18 @@ static void script_resize(void) {
 }
 static void repeat_directions(void) {
   for (int k = RIGHT; k <= DOWN; k++)
-    if ((held & (1u << k)) && SDL_GetTicks() >= repeatAt[k]) {
-      pressed |= 1u << k;
+    if ((held & (1ull << k)) && SDL_GetTicks() >= repeatAt[k]) {
+      pressed |= 1ull << k;
       repeatAt[k] = SDL_GetTicks() + 90;
     }
 }
-static bool down(int k) { return (pressed & (1u << k)) != 0; }
+static bool down(int k) { return (pressed & (1ull << k)) != 0; }
 
-/* Hotkeys: a button per action, set on the host menu's HOTKEYS page (host.ini hk_*). FF and rewind act while held,
- * the states on the press. A hotkey's button never reaches the game. The keyboard keeps its own (Space, R, F2, F4). */
-enum { HK_FF, HK_REWIND, HK_SAVE, HK_LOAD, HK_ACTIONS };
-static const char *const hotkeyIds[HK_ACTIONS] = {"ff", "rewind", "savestate", "loadstate"};
+/* Modifier hotkeys complement the controller page's direct bindings. FF and rewind act while held; state, undo and
+ * slot actions fire on the press. Their buttons never reach the game while completing the chord. */
+enum { HK_FF, HK_REWIND, HK_SAVE, HK_LOAD, HK_UNDO_SAVE, HK_UNDO_LOAD, HK_SLOT_NEXT, HK_SLOT_PREV, HK_ACTIONS };
+static const char *const hotkeyIds[HK_ACTIONS] = {"ff", "rewind", "savestate", "loadstate",
+                                                  "undosave", "undoload", "slotnext", "slotprev"};
 static unsigned hotkeyMask;
 // The game's own buttons and the menu's stay theirs: A, B, START, SELECT, the D-pad (and the stick's), MENU.
 static bool hotkey_assignable(int k) {
@@ -588,7 +728,9 @@ static const struct {
                 {"r1", R},      {"l2", L2},       {"r2", R2},       {"up", UP},         {"down", DOWN},
                 {"left", LEFT}, {"right", RIGHT}, {"menu", MENU},   {"select", SELECT}, {"start", START}, {"l3", L3},
                 {"sup", SUP},   {"sdown", SDOWN}, {"sleft", SLEFT}, {"sright", SRIGHT}, {"r3", R3},
-                {"p1", P1},     {"p2", P2},       {"p3", P3},       {"p4", P4}};
+                {"p1", P1},     {"p2", P2},       {"p3", P3},       {"p4", P4}, {"ff", FFKEY},
+                {"rewind", RWKEY}, {"savestate", SAVEKEY}, {"loadstate", LOADKEY}, {"undosave", UNSAVEKEY},
+                {"undoload", UNLOADKEY}, {"slotnext", NEXTKEY}, {"slotprev", PREVKEY}};
 static int key_named(const char *s) {
   for (size_t i = 0; i < sizeof keyNames / sizeof keyNames[0]; i++)
     if (!strcmp(s, keyNames[i].name))
@@ -604,14 +746,18 @@ static const char *key_name(int k) {
 /* ---- the host's settings (DATA/host.ini): what its menu sets ---- */
 static struct {
   int ffSpeed; // 0 = MAX (as many frames as fit), else 2..8
-  bool rewind, lcd;
+  bool rewind;
+  int displayMode; // enum pocket_display_shader_mode; legacy lcd=1 maps to LCD
   bool swapAB; // the controller's A / B and X / Y the other way round (devices disagree on which is SDL's "A")
   int hotkey[HK_ACTIONS]; // the HOTKEYS page's button per action, -1 none
   int dsHotkey[HK_ACTIONS];
   int modifier;
   bool fullscreen; // the WINDOW setting
   int panel;       // the PANEL setting: 0 = the window's size, else a preset the core lays out for
-} hostSet = {0, false, false, false, {R2, L2, -1, -1}, {R2, L2, -1, -1}, SELECT, false, 0};
+  bool autoResume; // a separate clean-exit state, restored only while its battery image still matches
+} hostSet = {.hotkey = {R2, L2, -1, -1, -1, -1, -1, -1},
+             .dsHotkey = {R2, L2, -1, -1, -1, -1, -1, -1},
+             .modifier = SELECT};
 static char hostIni[PATH_MAX];
 /* A DS game's L2 / R2 are its companion and screen buttons: with no modifier held for them, its FAST FORWARD and REWIND
  * go back to the stick clicks (R3 / L3), and come back to R2 / L2 when a modifier is picked again. */
@@ -635,6 +781,7 @@ static void modifier_takes(int k) {
   }
 }
 static void host_load(void) {
+  pd_pad_defaults(&padMap, faceLabels);
   FILE *f = fopen(hostIni, "r");
   char line[128];
   int v;
@@ -645,13 +792,17 @@ static void host_load(void) {
     if (sscanf(line, "rewind=%d", &v) == 1)
       hostSet.rewind = v != 0;
     if (sscanf(line, "lcd=%d", &v) == 1)
-      hostSet.lcd = v != 0;
+      hostSet.displayMode = v ? POCKET_DISPLAY_SHADER_LCD : POCKET_DISPLAY_SHADER_NONE;
+    if (sscanf(line, "display_filter=%d", &v) == 1 && v >= 0 && v <= POCKET_DISPLAY_SHADER_EDGE_SMOOTH)
+      hostSet.displayMode = v;
     if (sscanf(line, "swap_ab=%d", &v) == 1)
       hostSet.swapAB = v != 0;
     if (sscanf(line, "fullscreen=%d", &v) == 1)
       hostSet.fullscreen = v != 0;
     if (sscanf(line, "panel=%d", &v) == 1 && v >= 0 && v < PD_PANEL_PRESETS)
       hostSet.panel = v;
+    if (sscanf(line, "auto_resume=%d", &v) == 1)
+      hostSet.autoResume = v != 0;
     char modifier[16];
     if (sscanf(line, "hk_modifier=%15s", modifier) == 1) {
       int k = key_named(modifier);
@@ -670,10 +821,24 @@ static void host_load(void) {
         hostSet.dsHotkey[i] = hotkey_assignable(key_named(name)) ? key_named(name) : -1;
     }
     for (int i = 0; i < KB_COUNT; i++) {
-      char key[32];
-      snprintf(key, sizeof key, "kb_%s=%%d", kbIds[i]);
+      char key[40];
+      snprintf(key, sizeof key, "kb_%s=%%d", pd_pad_action_id(i));
       if (sscanf(line, key, &v) == 1 && v >= 0)
         kbKeys[i] = v;
+    }
+    for (int i = 0; i < PD_PAD_CONTROLS; i++) {
+      const char *id = pd_pad_control_id(i);
+      if (!id)
+        continue;
+      char key[48], name[16];
+      snprintf(key, sizeof key, "pad_%s=%%15s", id);
+      if (sscanf(line, key, name) == 1) {
+        int action = pd_pad_action_named(name);
+        if (action >= 0)
+          pd_pad_bind(&padMap, i, action);
+        else if (!strcmp(name, "off"))
+          padMap.action[i] = -1;
+      }
     }
   }
   if (f)
@@ -686,19 +851,31 @@ static void host_load(void) {
   swapFace = hostSet.swapAB;
 }
 static void host_save(void) {
-  FILE *f = fopen(hostIni, "w");
-  if (!f)
-    return;
-  fprintf(f, "ff_speed=%d\nrewind=%d\nlcd=%d\nswap_ab=%d\n", hostSet.ffSpeed, hostSet.rewind, hostSet.lcd, hostSet.swapAB);
-  fprintf(f, "fullscreen=%d\npanel=%d\n", hostSet.fullscreen, hostSet.panel);
-  fprintf(f, "hk_modifier=%s\n", key_name(hostSet.modifier));
+  char text[16384];
+  size_t used = 0;
+#define HOST_LINE(...)                                                                                                  \
+  do {                                                                                                                  \
+    int n = snprintf(text + used, sizeof text - used, __VA_ARGS__);                                                     \
+    if (n < 0 || (size_t)n >= sizeof text - used)                                                                       \
+      return;                                                                                                           \
+    used += (size_t)n;                                                                                                  \
+  } while (0)
+  HOST_LINE("ff_speed=%d\nrewind=%d\nlcd=%d\nswap_ab=%d\n", hostSet.ffSpeed, hostSet.rewind,
+            hostSet.displayMode == POCKET_DISPLAY_SHADER_LCD, hostSet.swapAB);
+  HOST_LINE("display_filter=%d\nfullscreen=%d\npanel=%d\nauto_resume=%d\n", hostSet.displayMode, hostSet.fullscreen,
+            hostSet.panel, hostSet.autoResume);
+  HOST_LINE("hk_modifier=%s\n", key_name(hostSet.modifier));
   for (int i = 0; i < HK_ACTIONS; i++) {
-    fprintf(f, "hk_%s=%s\n", hotkeyIds[i], key_name(hostSet.hotkey[i]));
-    fprintf(f, "ds_hk_%s=%s\n", hotkeyIds[i], key_name(hostSet.dsHotkey[i]));
+    HOST_LINE("hk_%s=%s\n", hotkeyIds[i], key_name(hostSet.hotkey[i]));
+    HOST_LINE("ds_hk_%s=%s\n", hotkeyIds[i], key_name(hostSet.dsHotkey[i]));
   }
   for (int i = 0; i < KB_COUNT; i++)
-    fprintf(f, "kb_%s=%d\n", kbIds[i], kbKeys[i]);
-  fclose(f);
+    HOST_LINE("kb_%s=%d\n", pd_pad_action_id(i), kbKeys[i]);
+  for (int i = 0; i < PD_PAD_CONTROLS; i++)
+    if (pd_pad_control_id(i))
+      HOST_LINE("pad_%s=%s\n", pd_pad_control_id(i), pd_pad_action_id(pd_pad_action(&padMap, i)));
+  pd_state_write_file(hostIni, text, used, true);
+#undef HOST_LINE
 }
 // A hotkey's button as the HOTKEYS page shows it.
 static const char *hotkey_label(int k) {
@@ -734,48 +911,33 @@ static unsigned hotkeys_held(const int *hotkeys, unsigned modifier, unsigned *la
     if (pressed & bit)
       *fired |= 1u << i;
   }
-  if (held & (1u << FFKEY))
+  if (held & (1ull << FFKEY))
     on |= 1u << HK_FF;
-  if (held & (1u << RWKEY))
+  if (held & (1ull << RWKEY))
     on |= 1u << HK_REWIND;
   if (down(SAVEKEY))
     *fired |= 1u << HK_SAVE;
   if (down(LOADKEY))
     *fired |= 1u << HK_LOAD;
+  if (down(UNSAVEKEY))
+    *fired |= 1u << HK_UNDO_SAVE;
+  if (down(UNLOADKEY))
+    *fired |= 1u << HK_UNDO_LOAD;
+  if (down(NEXTKEY))
+    *fired |= 1u << HK_SLOT_NEXT;
+  if (down(PREVKEY))
+    *fired |= 1u << HK_SLOT_PREV;
   return on;
 }
 
 /* ---- files ---- */
 static bool exists(const char *p) { return access(p, F_OK) == 0; }
 static unsigned char *read_file(const char *path, size_t *size, size_t max) {
-  FILE *f = fopen(path, "rb");
-  if (!f)
-    return NULL;
-  fseek(f, 0, SEEK_END);
-  long len = ftell(f);
-  rewind(f);
-  unsigned char *d = len > 0 && (size_t)len <= max ? malloc((size_t)len) : NULL;
-  if (d && fread(d, 1, (size_t)len, f) != (size_t)len) {
-    free(d);
-    d = NULL;
-  }
-  fclose(f);
-  *size = d ? (size_t)len : 0;
-  return d;
+  return pd_state_read_file(path, size, max);
 }
-// Written beside, then renamed over: a crash leaves the old file or the new one, never half of one.
+// The same unique-temporary, synced, atomic publication path serves states, settings and battery saves.
 static bool write_file(const char *path, const void *d, size_t n, bool sync) {
-  char tmp[PATH_MAX + 8];
-  snprintf(tmp, sizeof tmp, "%s.tmp", path);
-  FILE *f = fopen(tmp, "wb");
-  if (!f)
-    return false;
-  bool ok = fwrite(d, 1, n, f) == n && fflush(f) == 0 && (!sync || fsync(fileno(f)) == 0);
-  ok = fclose(f) == 0 && ok;
-  if (ok && pd_rename(tmp, path) == 0)
-    return true;
-  unlink(tmp);
-  return false;
+  return pd_state_write_file(path, d, n, sync);
 }
 /* A copy of the battery save before the game opens, like Android's and as host_io.c's pocket_save_backup names them (the
  * DS path's, and the hosts' before this one): DIR/STEM.backup-YYYYmmdd-HHMMSS.EXT, a new one only when the save data
@@ -943,6 +1105,9 @@ static enum retro_pixel_format pixelFormat = RETRO_PIXEL_FORMAT_0RGB1555;
 static struct retro_system_av_info av;
 static SDL_Texture *frameTexture;
 static int textureW, textureH, frameW, frameH;
+static unsigned char *frameCopy;
+static size_t frameCopyCapacity, frameCopyStride;
+static bool frameCopyValid;
 static enum retro_pixel_format textureFormat; // what frameTexture was made for: a core of another format needs a new one
 static double srcRate = 32768, rateTrim = 1;   // the core's audio rate (SET_SYSTEM_AV_INFO can change it), the pacing's trim
 static bool ffNow, rewindingNow, ffQuick; // ffQuick: the quick menu's FF toggle, until it is turned off again
@@ -1096,6 +1261,27 @@ static bool environment(unsigned cmd, void *data) {
 }
 
 /* ---- video ---- */
+static void frame_copy(const void *data, unsigned w, unsigned h, size_t pitch) {
+  size_t bpp = pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888 ? 4 : 2, row = (size_t)w * bpp;
+  if (!w || !h || row / bpp != w || pitch < row || (h && row > SIZE_MAX / h)) {
+    frameCopyValid = false;
+    return;
+  }
+  size_t bytes = row * h;
+  if (frameCopyCapacity < bytes) {
+    unsigned char *grown = realloc(frameCopy, bytes);
+    if (!grown) {
+      frameCopyValid = false;
+      return;
+    }
+    frameCopy = grown;
+    frameCopyCapacity = bytes;
+  }
+  for (unsigned y = 0; y < h; y++)
+    memcpy(frameCopy + (size_t)y * row, (const unsigned char *)data + (size_t)y * pitch, row);
+  frameCopyStride = row;
+  frameCopyValid = true;
+}
 static void video_refresh(const void *data, unsigned w, unsigned h, size_t pitch) {
   panelActive = panelPending;
   panelPending = false;
@@ -1106,6 +1292,7 @@ static void video_refresh(const void *data, unsigned w, unsigned h, size_t pitch
     return;
   SDL_Rect r = {0, 0, (int)w, (int)h};
   SDL_UpdateTexture(frameTexture, &r, data, (int)pitch);
+  frame_copy(data, w, h, pitch);
   if ((int)w != frameW || (int)h != frameH) // the core's canvas: it follows the aspect and the panel
     fprintf(stderr, "Frame: %ux%u\n", w, h);
   frameW = (int)w;
@@ -1188,12 +1375,128 @@ static bool overlay_notice(void) {
   return true;
 }
 
-/* LCD (the host menu's LCD FILTER): Keegan Whitacre's output-space aperture mask (pokedaisy-brick dfc62a0),
- * multiplied over the whole presented frame. */
+static const char *const displayModeNames[] = {"OFF", "LCD", "SCANLINES", "CRT", "GBA COLOR", "EDGE SMOOTH"};
+static struct pocket_display_shader *displayShader;
+static int displayShaderMode = -1, displayErrorMode = -1;
+static uint8_t *displayInput;
+static size_t displayInputCapacity;
+static SDL_Texture *displayTexture;
+static int displayTextureW, displayTextureH;
+static double presentMs, filterMs;
+#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+#define PD_SHADER_PIXEL_FORMAT SDL_PIXELFORMAT_RGBA8888
+#else
+#define PD_SHADER_PIXEL_FORMAT SDL_PIXELFORMAT_ABGR8888
+#endif
 static SDL_Texture *lcdTexture;
 static int lcdW, lcdH;
-static void render_lcd(void) {
-  if (!hostSet.lcd)
+static void display_filter_cleanup(void) {
+  pocket_display_shader_destroy(displayShader);
+  displayShader = NULL;
+  displayShaderMode = -1;
+  SDL_DestroyTexture(displayTexture);
+  displayTexture = NULL;
+  displayTextureW = displayTextureH = 0;
+  SDL_DestroyTexture(lcdTexture);
+  lcdTexture = NULL;
+  lcdW = lcdH = 0;
+  free(displayInput);
+  displayInput = NULL;
+  displayInputCapacity = 0;
+}
+/* Filter only the core's own frame. The panel and HUD keep their native textures and coordinates, and SDL performs the
+ * final scale to frameRect. CRT uses no more than a 2x source buffer, never the output window's dimensions. */
+static bool display_filter_render(int ow, int oh) {
+  if (!hostSet.displayMode || !frameTexture || frameW <= 0 || frameH <= 0 || !frameCopyValid ||
+      hostSet.displayMode == POCKET_DISPLAY_SHADER_LCD) {
+    if (displayShader || displayTexture)
+      display_filter_cleanup();
+    return false; // LCD has its exact legacy output-space pass below the panel and HUD
+  }
+  uint64_t started = SDL_GetPerformanceCounter();
+  if (displayShaderMode != hostSet.displayMode) {
+    pocket_display_shader_destroy(displayShader);
+    struct pocket_display_shader_config config = {(enum pocket_display_shader_mode)hostSet.displayMode, false};
+    displayShader = pocket_display_shader_create(config);
+    displayShaderMode = displayShader ? hostSet.displayMode : -1;
+  }
+  size_t bytes = (size_t)frameW * frameH * 4;
+  if (!displayShader || bytes / 4 / (size_t)frameH != (size_t)frameW)
+    goto unavailable;
+  if (displayInputCapacity < bytes) {
+    uint8_t *grown = realloc(displayInput, bytes);
+    if (!grown)
+      goto unavailable;
+    displayInput = grown;
+    displayInputCapacity = bytes;
+  }
+  for (int y = 0; y < frameH; y++) {
+    const unsigned char *src = frameCopy + (size_t)y * frameCopyStride;
+    uint8_t *dst = displayInput + (size_t)y * frameW * 4;
+    for (int x = 0; x < frameW; x++, dst += 4) {
+      uint32_t color;
+      if (pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888) {
+        memcpy(&color, src + x * 4, 4);
+        dst[0] = (uint8_t)(color >> 16);
+        dst[1] = (uint8_t)(color >> 8);
+        dst[2] = (uint8_t)color;
+      } else {
+        uint16_t p;
+        memcpy(&p, src + x * 2, 2);
+        if (pixelFormat == RETRO_PIXEL_FORMAT_RGB565) {
+          dst[0] = (uint8_t)((p >> 11) * 255 / 31);
+          dst[1] = (uint8_t)(((p >> 5) & 63) * 255 / 63);
+          dst[2] = (uint8_t)((p & 31) * 255 / 31);
+        } else {
+          dst[0] = (uint8_t)(((p >> 10) & 31) * 255 / 31);
+          dst[1] = (uint8_t)(((p >> 5) & 31) * 255 / 31);
+          dst[2] = (uint8_t)((p & 31) * 255 / 31);
+        }
+      }
+      dst[3] = 255;
+    }
+  }
+  int scale = hostSet.displayMode == POCKET_DISPLAY_SHADER_SCANLINES || hostSet.displayMode == POCKET_DISPLAY_SHADER_EDGE_SMOOTH
+                  ? 2
+                  : 1;
+  if (hostSet.displayMode == POCKET_DISPLAY_SHADER_CRT && frameW <= 480 && frameH <= 270 && ow >= frameW * 2 &&
+      oh >= frameH * 2)
+    scale = 2;
+  int dw = frameW * scale, dh = frameH * scale;
+  struct pocket_display_shader_frame out;
+  if (pocket_display_shader_process(displayShader, displayInput, (size_t)frameW, (size_t)frameH, (size_t)frameW * 4,
+                                    (size_t)dw, (size_t)dh, &out) != POCKET_DISPLAY_SHADER_OK)
+    goto unavailable;
+  if (!displayTexture || displayTextureW != dw || displayTextureH != dh) {
+    SDL_DestroyTexture(displayTexture);
+    displayTexture = SDL_CreateTexture(renderer, PD_SHADER_PIXEL_FORMAT, SDL_TEXTUREACCESS_STREAMING, dw, dh);
+    displayTextureW = displayTexture ? dw : 0;
+    displayTextureH = displayTexture ? dh : 0;
+    if (displayTexture) {
+      SDL_SetTextureBlendMode(displayTexture, SDL_BLENDMODE_NONE);
+      SDL_SetTextureScaleMode(displayTexture, SDL_ScaleModeNearest);
+      fprintf(stderr, "Display filter: %s %dx%d (source %dx%d)\n", displayModeNames[hostSet.displayMode], dw, dh, frameW,
+              frameH);
+    }
+  }
+  if (!displayTexture || SDL_UpdateTexture(displayTexture, NULL, out.pixels, (int)out.stride) < 0)
+    goto unavailable;
+  SDL_Rect src = {0, 0, dw, dh};
+  SDL_FRect dst = {(float)frameRect.x, (float)frameRect.y, (float)frameRect.w, (float)frameRect.h};
+  bool ok = SDL_RenderCopyF(renderer, displayTexture, &src, &dst) == 0;
+  filterMs += (double)(SDL_GetPerformanceCounter() - started) * 1000.0 / SDL_GetPerformanceFrequency();
+  return ok;
+
+unavailable:
+  filterMs += (double)(SDL_GetPerformanceCounter() - started) * 1000.0 / SDL_GetPerformanceFrequency();
+  if (displayErrorMode != hostSet.displayMode) {
+    displayErrorMode = hostSet.displayMode;
+    notice("Display filter unavailable; using the normal picture");
+  }
+  return false;
+}
+static void render_legacy_lcd(void) {
+  if (hostSet.displayMode != POCKET_DISPLAY_SHADER_LCD)
     return;
   int w, h;
   if (SDL_GetRendererOutputSize(renderer, &w, &h) < 0 || w <= 0 || h <= 0)
@@ -1206,7 +1509,7 @@ static void render_lcd(void) {
       return;
     for (int y = 0; y < h; y++)
       for (int x = 0; x < w; x++)
-        mask[y * w + x] = pocket_lcd_pixel(x, y);
+        mask[y * w + x] = pocket_lcd_pixel((unsigned)x, (unsigned)y);
     lcdTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
     if (lcdTexture && (SDL_UpdateTexture(lcdTexture, NULL, mask, w * 4) < 0 ||
                        SDL_SetTextureBlendMode(lcdTexture, SDL_BLENDMODE_MOD) < 0)) {
@@ -1220,13 +1523,13 @@ static void render_lcd(void) {
   if (lcdTexture)
     SDL_RenderCopy(renderer, lcdTexture, NULL, NULL);
 }
-static double presentMs;
+static void state_preview_draw(struct pd_canvas *c);
 static void present_game(const struct pd_menu *menu) {
   int ow = W, oh = H;
   SDL_GetRendererOutputSize(renderer, &ow, &oh);
   SDL_RenderClear(renderer);
   frameRect = frame_place(ow, oh);
-  if (frameTexture && frameW > 0) {
+  if (frameTexture && frameW > 0 && !display_filter_render(ow, oh)) {
     SDL_Rect src = {0, 0, frameW, frameH};
     SDL_FRect dst = {(float)frameRect.x, (float)frameRect.y, (float)frameRect.w, (float)frameRect.h};
     SDL_RenderCopyF(renderer, frameTexture, &src, &dst);
@@ -1291,11 +1594,12 @@ static void present_game(const struct pd_menu *menu) {
       }
     }
   }
-  render_lcd();
+  render_legacy_lcd();
   bool any = false;
   overlay_begin();
   if (menu) {
     pd_menu_draw((struct pd_menu *)menu, &overlay);
+    state_preview_draw(&overlay);
     any = true;
   }
   any |= overlay_notice();
@@ -1578,7 +1882,7 @@ static void pacing_check(double frameMs) {
 static double emuMs;
 static void perf_frame(uint64_t start, double hz) {
   static int on = -1, n, late;
-  static double sum, worst, presents, emus;
+  static double sum, worst, presents, emus, filters;
   static uint64_t windowStart;
   if (on < 0)
     on = getenv("POCKET_PERF") != NULL;
@@ -1592,17 +1896,18 @@ static void perf_frame(uint64_t start, double hz) {
   sum += work;
   presents += presentMs;
   emus += emuMs;
-  presentMs = emuMs = 0;
+  filters += filterMs;
+  presentMs = emuMs = filterMs = 0;
   worst = work > worst ? work : worst;
   late += work > 1000.0 / hz;
   if (end - windowStart >= 5 * f) {
     fprintf(stderr,
-            "perf: %d frames in %.1f s, core %.2f ms, work %.2f ms avg (%.2f in present) / %.2f worst, %d late, "
-            "screen %d Hz, %s, audio queued %u B\n",
-            n, (double)(end - windowStart) / f, emus / n, sum / n, presents / n, worst, late, screenHz,
+            "perf: %d frames in %.1f s, core %.2f ms, work %.2f ms avg (%.2f filter, %.2f present) / %.2f worst, "
+            "%d late, screen %d Hz, %s, audio queued %u B\n",
+            n, (double)(end - windowStart) / f, emus / n, sum / n, filters / n, presents / n, worst, late, screenHz,
             vsyncPaced ? "paced by the screen" : "paced by the timer", audio ? SDL_GetQueuedAudioSize(audio) : 0);
     n = late = 0;
-    sum = worst = presents = emus = 0;
+    sum = worst = presents = emus = filters = 0;
     windowStart = end;
   }
 }
@@ -1623,21 +1928,166 @@ static void panel_follow(void) {
     optionsChanged = true;
   }
 }
-static bool state_file(const char *ss, bool save) {
-  if (save) {
-    size_t n = core.serialize_size();
-    void *d = n ? malloc(n) : NULL;
-    bool ok = d && core.serialize(d, n) && write_file(ss, d, n, false);
-    free(d);
-    return ok;
-  }
+static char stateBase[PATH_MAX * 2], stateRom[256], stateCore[16];
+static int stateSlot = 1;
+static bool state_named(const char *suffix, char *out, size_t size) {
+  int n = snprintf(out, size, "%s%s", stateBase, suffix);
+  return n >= 0 && (size_t)n < size;
+}
+static bool state_slot_file(int slot, char *out, size_t size) {
+  return pd_state_slot_path(root, stateRom, stateCore, slot, out, size);
+}
+static void state_select(int slot) {
+  stateSlot = (slot + PD_STATE_SLOTS - 1) % PD_STATE_SLOTS + 1;
+  char path[PATH_MAX * 2 + 32], text[8];
+  int n = snprintf(text, sizeof text, "%d\n", stateSlot);
+  if (state_named(".selected", path, sizeof path) && n > 0)
+    write_file(path, text, (size_t)n, true);
+}
+static void state_selected_load(void) {
+  char path[PATH_MAX * 2 + 32];
   size_t n;
-  unsigned char *d = read_file(ss, &n, 64u << 20);
-  bool ok = d && core.unserialize(d, n);
-  free(d);
+  unsigned char *text = state_named(".selected", path, sizeof path) ? read_file(path, &n, 8) : NULL;
+  if (text) {
+    char value[8] = {0};
+    memcpy(value, text, n < sizeof value - 1 ? n : sizeof value - 1);
+    int slot = atoi(value);
+    if (slot >= 1 && slot <= PD_STATE_SLOTS)
+      stateSlot = slot;
+  }
+  free(text);
+}
+static unsigned char *state_serialize(size_t *size) {
+  size_t n = core.serialize_size();
+  unsigned char *data = n && n <= PD_STATE_FILE_MAX ? malloc(n) : NULL;
+  if (!data || !core.serialize(data, n)) {
+    free(data);
+    *size = 0;
+    return NULL;
+  }
+  *size = n;
+  return data;
+}
+static bool state_load_file(const char *path) {
+  size_t n;
+  unsigned char *data = read_file(path, &n, PD_STATE_FILE_MAX);
+  /* armGBA accepts several historical layouts. The core validates them; an exact current-size check would reject them. */
+  bool ok = data && n && core.unserialize(data, n);
+  free(data);
   if (ok)
-    rewind_clear(); // its differences lead back from another history
+    rewind_clear();
   return ok;
+}
+static void core_callbacks(void) {
+  core.set_video_refresh(video_refresh);
+  core.set_audio_sample(audio_sample);
+  core.set_audio_sample_batch(audio_batch);
+  core.set_input_poll(input_poll);
+  core.set_input_state(input_state);
+}
+/* A failed automatic deserialization may have touched the core. Reboot it before exposing the game or its battery. */
+static bool core_restart(const struct retro_game_info *info) {
+  core.unload_game();
+  core.deinit();
+  pixelFormat = RETRO_PIXEL_FORMAT_0RGB1555;
+  core.set_environment(environment);
+  core.init();
+  core_callbacks();
+  if (!core.load_game(info))
+    return false;
+  core.get_system_av_info(&av);
+  frameW = frameH = 0;
+  frameCopyValid = false;
+  frame_texture();
+  return true;
+}
+
+#define STATE_THUMB_W 96
+#define STATE_THUMB_H 72
+struct state_thumb_header {
+  char magic[4];
+  uint32_t w, h;
+};
+static bool statePreviewMenu, statePreviewHave;
+static int statePreviewW, statePreviewH;
+static uint32_t statePreviewPixels[STATE_THUMB_W * STATE_THUMB_H];
+static void *state_thumbnail(size_t *outSize) {
+  *outSize = 0;
+  if (!frameCopyValid || frameW <= 0 || frameH <= 0)
+    return NULL;
+  double scale = STATE_THUMB_W / (double)frameW;
+  if (scale > STATE_THUMB_H / (double)frameH)
+    scale = STATE_THUMB_H / (double)frameH;
+  if (scale > 1)
+    scale = 1;
+  int w = frameW * scale + 0.5, h = frameH * scale + 0.5;
+  if (w < 1)
+    w = 1;
+  if (h < 1)
+    h = 1;
+  size_t size = sizeof(struct state_thumb_header) + (size_t)w * h * 4;
+  unsigned char *out = malloc(size);
+  if (!out)
+    return NULL;
+  struct state_thumb_header header = {{'P', 'D', 'T', '1'}, (uint32_t)w, (uint32_t)h};
+  memcpy(out, &header, sizeof header);
+  uint32_t *thumb = (uint32_t *)(out + sizeof header);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      const unsigned char *src = frameCopy + (size_t)(y * frameH / h) * frameCopyStride +
+                                 x * frameW / w * (pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888 ? 4 : 2);
+      uint32_t color;
+      if (pixelFormat == RETRO_PIXEL_FORMAT_XRGB8888) {
+        memcpy(&color, src, 4);
+        color &= 0xFFFFFF;
+      } else {
+        uint16_t p;
+        memcpy(&p, src, 2);
+        if (pixelFormat == RETRO_PIXEL_FORMAT_RGB565)
+          color = ((p >> 11) * 255 / 31) << 16 | (((p >> 5) & 63) * 255 / 63) << 8 | (p & 31) * 255 / 31;
+        else
+          color = (((p >> 10) & 31) * 255 / 31) << 16 | (((p >> 5) & 31) * 255 / 31) << 8 | (p & 31) * 255 / 31;
+      }
+      thumb[y * w + x] = color;
+    }
+  *outSize = size;
+  return out;
+}
+static void state_preview_load(int slot) {
+  statePreviewHave = false;
+  char state[PATH_MAX * 2 + 32], path[PATH_MAX * 2 + 48];
+  if (!state_slot_file(slot, state, sizeof state) || !pd_state_sidecar(state, ".thumb", path, sizeof path))
+    return;
+  size_t n;
+  unsigned char *data = read_file(path, &n, sizeof(struct state_thumb_header) + sizeof statePreviewPixels);
+  if (!data || n < sizeof(struct state_thumb_header)) {
+    free(data);
+    return;
+  }
+  struct state_thumb_header header;
+  memcpy(&header, data, sizeof header);
+  bool valid = !memcmp(header.magic, "PDT1", 4) && header.w && header.h && header.w <= STATE_THUMB_W &&
+               header.h <= STATE_THUMB_H && n == sizeof header + (size_t)header.w * header.h * 4;
+  if (valid) {
+    statePreviewW = (int)header.w;
+    statePreviewH = (int)header.h;
+    memcpy(statePreviewPixels, data + sizeof header, (size_t)header.w * header.h * 4);
+    statePreviewHave = true;
+  }
+  free(data);
+}
+static void state_preview_draw(struct pd_canvas *c) {
+  if (!statePreviewMenu || c->w < 240 || c->h < 144)
+    return;
+  int x = c->w - STATE_THUMB_W - 14, y = 43;
+  pd_fill(c, x - 2, y - 2, STATE_THUMB_W + 4, STATE_THUMB_H + 4, PD_VALUE);
+  pd_fill(c, x - 1, y - 1, STATE_THUMB_W + 2, STATE_THUMB_H + 2, 0x101010);
+  if (statePreviewHave)
+    for (int py = 0; py < statePreviewH; py++)
+      for (int px = 0; px < statePreviewW; px++)
+        pd_fill(c, x + px, y + py, 1, 1, statePreviewPixels[py * statePreviewW + px]);
+  else
+    pd_text_fit(c, x + 4, y + STATE_THUMB_H / 2, STATE_THUMB_W - 8, "NO PREVIEW", PD_MUTED, PD_NO_SHADOW);
 }
 /* The .sav: the core's save memory, then its cartridge clock (RETRO_MEMORY_RTC: a Game Boy MBC3's, Crystal's) right
  * after it - mGBA's own layout, which the old host wrote too. NULL out: the size. */
@@ -1665,25 +2115,25 @@ struct save_baseline {
   unsigned char *data;
   size_t size;
 };
-static void sram_write(const char *sav, struct save_baseline *copy, bool sync) {
+static bool sram_write(const char *sav, struct save_baseline *copy, bool sync) {
   static unsigned char *now;
   static size_t nowSize;
   size_t n = save_image(NULL);
   if (!n)
-    return;
+    return true;
   if (n > nowSize) {
     free(now);
     now = malloc(n);
     nowSize = now ? n : 0;
     if (!now)
-      return;
+      return false;
   }
   save_image(now);
-  if (n == copy->size && !memcmp(now, copy->data, n))
-    return;
+  if (copy->data && n == copy->size && !memcmp(now, copy->data, n) && exists(sav))
+    return true;
   if (!write_file(sav, now, n, sync)) {
     notice("Save write failed");
-    return;
+    return false;
   }
   unsigned char *previous = copy->data;
   size_t previousSize = copy->size;
@@ -1691,6 +2141,172 @@ static void sram_write(const char *sav, struct save_baseline *copy, bool sync) {
   copy->size = n;
   now = previous;
   nowSize = previousSize;
+  return true;
+}
+static void sram_refresh(struct save_baseline *copy) {
+  free(copy->data);
+  copy->data = NULL;
+  copy->size = 0;
+  size_t n = save_image(NULL);
+  if (n) {
+    copy->data = malloc(n);
+    if (copy->data)
+      copy->size = save_image(copy->data);
+  }
+}
+static void battery_reload(const char *sav, struct save_baseline *copy) {
+  size_t n = save_image(NULL), fn;
+  unsigned char *data = n ? read_file(sav, &fn, PD_STATE_FILE_MAX) : NULL;
+  if (data)
+    save_load(data, fn);
+  free(data);
+  sram_refresh(copy);
+}
+static bool state_save_slot(int slot) {
+  char path[PATH_MAX * 2 + 32];
+  size_t n, thumbSize;
+  unsigned char *data = state_slot_file(slot, path, sizeof path) ? state_serialize(&n) : NULL;
+  void *thumb = data ? state_thumbnail(&thumbSize) : NULL;
+  bool ok = data && pd_state_slot_save(path, data, n, thumb, thumbSize);
+  free(thumb);
+  free(data);
+  return ok;
+}
+static bool state_before_load(const char *sav, const char *backups, struct save_baseline *copy) {
+  return sram_write(sav, copy, true) && save_backup(sav, backups);
+}
+static bool state_load_slot(int slot, const char *sav, const char *backups, struct save_baseline *copy) {
+  char path[PATH_MAX * 2 + 32], undo[PATH_MAX * 2 + 48];
+  if (!state_slot_file(slot, path, sizeof path) || !state_named(".undo-load.ss", undo, sizeof undo) ||
+      !state_before_load(sav, backups, copy))
+    return false;
+  size_t n;
+  unsigned char *snapshot = state_serialize(&n);
+  /* No load without a committed way back to the live state it replaces. */
+  bool ok = snapshot && write_file(undo, snapshot, n, true);
+  free(snapshot);
+  if (ok)
+    ok = state_load_file(path);
+  if (ok)
+    sram_refresh(copy);
+  return ok;
+}
+static bool state_undo_load(const char *sav, const char *backups, struct save_baseline *copy) {
+  char undo[PATH_MAX * 2 + 48];
+  if (!state_named(".undo-load.ss", undo, sizeof undo) || !pd_state_exists(undo) ||
+      !state_before_load(sav, backups, copy))
+    return false;
+  bool ok = state_load_file(undo);
+  if (ok)
+    sram_refresh(copy);
+  return ok;
+}
+static uint64_t state_hash(const void *bytes, size_t size) {
+  const unsigned char *p = bytes;
+  uint64_t hash = 1469598103934665603ull;
+  for (size_t i = 0; i < size; i++) {
+    hash ^= p[i];
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+static bool state_resume_fail(const char *stage) {
+  const char *fail = getenv("POCKET_RESUME_FAIL");
+  return fail && !strcmp(fail, stage);
+}
+static bool state_resume_write(const char *sav) {
+  char resume[PATH_MAX * 2 + 48], battery[PATH_MAX * 2 + 48], fresh[PATH_MAX * 2 + 48], ready[PATH_MAX * 2 + 48];
+  if (!state_named(".resume.ss", resume, sizeof resume) || !state_named(".resume.sav", battery, sizeof battery) ||
+      !state_named(".fresh", fresh, sizeof fresh) || !state_named(".resume.ready", ready, sizeof ready))
+    return false;
+  size_t n, thumbSize, batterySize = save_image(NULL), fileSize = 0;
+  unsigned char *data = state_serialize(&n);
+  void *thumb = data ? state_thumbnail(&thumbSize) : NULL;
+  unsigned char *batteryData = data && batterySize ? read_file(sav, &fileSize, PD_STATE_FILE_MAX) : NULL;
+  bool ok = data && (!batterySize || (batteryData && fileSize == batterySize));
+  if (ok && !state_resume_fail("battery"))
+    ok = write_file(battery, batteryData, fileSize, true);
+  else if (state_resume_fail("battery"))
+    ok = false;
+  if (ok && !state_resume_fail("state"))
+    ok = write_file(resume, data, n, true);
+  else if (state_resume_fail("state"))
+    ok = false;
+  char thumbPath[PATH_MAX * 2 + 64];
+  if (ok && pd_state_sidecar(resume, ".thumb", thumbPath, sizeof thumbPath) &&
+      (!thumb || !write_file(thumbPath, thumb, thumbSize, true)))
+    pd_state_remove_file(thumbPath);
+  /* The content hashes are the commit. Any older manifest left by a partial update rejects the mixed bundle. */
+  if (ok && !state_resume_fail("ready")) {
+    char text[96];
+    int len = snprintf(text, sizeof text, "PDR1 %016llx %016llx\n", (unsigned long long)state_hash(data, n),
+                       (unsigned long long)state_hash(batteryData, fileSize));
+    ok = len > 0 && (size_t)len < sizeof text && write_file(ready, text, (size_t)len, true);
+  } else if (state_resume_fail("ready"))
+    ok = false;
+  if (ok)
+    pd_state_remove_file(fresh);
+  free(batteryData);
+  free(thumb);
+  free(data);
+  return ok;
+}
+enum resume_status { RESUME_MISSING, RESUME_FRESH, RESUME_MISMATCH, RESUME_READY };
+static bool state_resume_complete(const char *resume, const char *battery, const char *ready) {
+  size_t stateSize, batterySize, textSize;
+  unsigned char *state = read_file(resume, &stateSize, PD_STATE_FILE_MAX);
+  unsigned char *batteryData = read_file(battery, &batterySize, PD_STATE_FILE_MAX);
+  unsigned char *text = pd_state_exists(ready) ? read_file(ready, &textSize, 96) : NULL;
+  bool complete;
+  if (text) {
+    char manifest[97] = {0};
+    memcpy(manifest, text, textSize < sizeof manifest - 1 ? textSize : sizeof manifest - 1);
+    unsigned long long stateHash, batteryHash;
+    char tail;
+    complete = state && batteryData && sscanf(manifest, "PDR1 %16llx %16llx %c", &stateHash, &batteryHash, &tail) == 2 &&
+               stateHash == state_hash(state, stateSize) && batteryHash == state_hash(batteryData, batterySize);
+  } else {
+    /* This host's original bundle wrote the battery first. Reject the partial-new-battery ordering. */
+    struct stat stateInfo, batteryInfo;
+    complete = state && batteryData && !stat(resume, &stateInfo) && !stat(battery, &batteryInfo) &&
+               stateInfo.st_mtime >= batteryInfo.st_mtime;
+  }
+  free(text);
+  free(batteryData);
+  free(state);
+  return complete;
+}
+static enum resume_status state_resume_status(const char *sav) {
+  char resume[PATH_MAX * 2 + 48], battery[PATH_MAX * 2 + 48], fresh[PATH_MAX * 2 + 48], ready[PATH_MAX * 2 + 48];
+  if (!state_named(".resume.ss", resume, sizeof resume) || !state_named(".resume.sav", battery, sizeof battery) ||
+      !state_named(".fresh", fresh, sizeof fresh) || !state_named(".resume.ready", ready, sizeof ready) ||
+      !pd_state_exists(resume))
+    return RESUME_MISSING;
+  if (pd_state_exists(fresh))
+    return RESUME_FRESH;
+  if (!state_resume_complete(resume, battery, ready))
+    return RESUME_MISMATCH;
+  size_t expectedSize, currentSize = 0, memorySize = save_image(NULL);
+  unsigned char *expected = read_file(battery, &expectedSize, PD_STATE_FILE_MAX);
+  unsigned char *current = memorySize ? read_file(sav, &currentSize, PD_STATE_FILE_MAX) : NULL;
+  bool match = expected && (memorySize ? current && same_save(expected, expectedSize, current, currentSize)
+                                       : expectedSize == 0);
+  free(current);
+  free(expected);
+  return match ? RESUME_READY : RESUME_MISMATCH;
+}
+static bool state_import_save(const char *from, const char *sav) {
+  void *mem = core.get_memory_data(RETRO_MEMORY_SAVE_RAM), *rtc = core.get_memory_data(RETRO_MEMORY_RTC);
+  size_t n = mem ? core.get_memory_size(RETRO_MEMORY_SAVE_RAM) : 0;
+  size_t rn = rtc ? core.get_memory_size(RETRO_MEMORY_RTC) : 0;
+  size_t fn;
+  unsigned char *data = read_file(from, &fn, PD_STATE_FILE_MAX);
+  bool compatible = data && n && (fn == n || (rn && fn == n + rn) || (!rn && fn > n && fn - n <= 64));
+  char fresh[PATH_MAX * 2 + 48];
+  bool ok = compatible && state_named(".fresh", fresh, sizeof fresh) && write_file(fresh, "fresh\n", 6, true) &&
+            write_file(sav, data, fn, true);
+  free(data);
+  return ok;
 }
 // The settings the old host kept in DATA/settings.ini become the core's (SAVES/pokedaisy/settings.ini), once.
 static void settings_migrate(void) {
@@ -1761,8 +2377,8 @@ extern int pd_ds_run(const char *, const char *, int, const char *, SDL_Renderer
 static bool ds_running(void) { return running != 0; }
 #endif
 // The host menu's rows, top to bottom (fast-forward is the FAST FORWARD hotkey's, held).
-enum { M_RESUME, M_SAVE, M_LOAD, M_HOTKEYS, M_KEYBOARD, M_REWIND, M_FFSPEED, M_LCD, M_SWAP, M_QUIT,
-       M_COUNT };
+enum { M_RESUME, M_SAVE, M_LOAD, M_HOTKEYS, M_KEYBOARD, M_CONTROLLER, M_STATES, M_UNDO_SAVE, M_UNDO_LOAD,
+       M_AUTO_RESUME, M_REWIND, M_FFSPEED, M_LCD, M_SWAP, M_QUIT, M_COUNT };
 static void run_game(const char *path, int maxFrames, const char *shot, bool fromList) {
 #ifdef POCKET_DSPERATE
   const char *ext = strrchr(path, '.');
@@ -1775,7 +2391,7 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
     // The DS backend owns its device while running; the GB / GBA games get theirs back.
     audio_open();
     audioLost = !audio;
-    held = pressed = 0;
+    held = pressed = padHeld = 0;
     return;
   }
 #endif
@@ -1819,8 +2435,13 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
   // DS uses L2 for the Companion and R2 for screen switching. Keep the host's DS bindings separate.
   const bool dsGame = !strcmp(coreName, "pokedaisy_ds_libretro" PD_CORE_EXT);
   int *hotkeys = dsGame ? hostSet.dsHotkey : hostSet.hotkey;
-  // armGBA's states aren't mGBA's: each core its own file.
-  snprintf(ss, sizeof ss, "%s/states/%s%s.ss", root, name, strstr(coreName, "_gba_") ? ".armgba" : "");
+  // armGBA's states aren't mGBA's: each core its own files. Slot 1 keeps the old single-state name.
+  snprintf(stateRom, sizeof stateRom, "%s", name);
+  snprintf(stateCore, sizeof stateCore, "%s", strstr(coreName, "_gba_") ? ".armgba" : "");
+  snprintf(stateBase, sizeof stateBase, "%s/states/%s%s", root, name, stateCore);
+  stateSlot = 1;
+  state_selected_load();
+  state_slot_file(1, ss, sizeof ss);
   if (strstr(coreName, "_gba_")) {
     // A GBA state from before armGBA is mGBA's: it can't load here, so say so instead of "No state saved yet".
     char old[PATH_MAX * 2 + 16];
@@ -1842,11 +2463,7 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
   optionsChanged = false;
   core.set_environment(environment);
   core.init();
-  core.set_video_refresh(video_refresh);
-  core.set_audio_sample(audio_sample);
-  core.set_audio_sample_batch(audio_batch);
-  core.set_input_poll(input_poll);
-  core.set_input_state(input_state);
+  core_callbacks();
   struct retro_game_info info = {path, rom, romSize, NULL};
   if (!core.load_game(&info)) {
     core.deinit();
@@ -1860,28 +2477,61 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
   srcRate = av.timing.sample_rate > 0 ? av.timing.sample_rate : 32768;
   double hz = av.timing.fps > 0 ? av.timing.fps : 59.7275;
   frameW = frameH = 0;
+  frameCopyValid = false;
   frame_texture();
+  // An import has already had the normal pre-open backup; validate its size before replacing the battery atomically.
+  if (importFile && !state_import_save(importFile, sav)) {
+    core.unload_game();
+    core.deinit();
+    dlclose(core.dl);
+    memset(&core, 0, sizeof core);
+    free(rom);
+    appError = 1;
+    notice("Save import failed: wrong file or save size");
+    return;
+  }
   // The battery save: the file's bytes into the core's, and written back whenever they change.
   struct save_baseline sramCopy = {0};
-  {
-    size_t n = save_image(NULL), fn;
-    unsigned char *d = n ? read_file(sav, &fn, 64u << 20) : NULL;
-    if (d)
-      save_load(d, fn);
-    free(d);
-    sramCopy.data = n ? malloc(n) : NULL;
-    if (sramCopy.data)
-      sramCopy.size = save_image(sramCopy.data);
+  battery_reload(sav, &sramCopy);
+  if (hostSet.autoResume) {
+    enum resume_status resume = state_resume_status(sav);
+    if (resume == RESUME_READY) {
+      char resumePath[PATH_MAX * 2 + 48];
+      bool loaded = state_named(".resume.ss", resumePath, sizeof resumePath) && state_load_file(resumePath);
+      if (loaded) {
+        battery_reload(sav, &sramCopy); // the file's battery and clock win over the state's copies
+        notice("Resumed from last session");
+      } else {
+        notice("Resume load failed; game restarted");
+        if (!core_restart(&info)) {
+          free(sramCopy.data);
+          core.deinit();
+          dlclose(core.dl);
+          memset(&core, 0, sizeof core);
+          free(rom);
+          appError = 1;
+          notice("Core restart failed");
+          return;
+        }
+        srcRate = av.timing.sample_rate > 0 ? av.timing.sample_rate : 32768;
+        hz = av.timing.fps > 0 ? av.timing.fps : 59.7275;
+        battery_reload(sav, &sramCopy);
+      }
+    } else if (resume == RESUME_MISMATCH)
+      notice("Resume skipped: battery save changed");
+    else if (resume == RESUME_FRESH)
+      notice("Resume skipped: imported save");
   }
   int rewindMB = getenv("POCKET_REWIND_MB") ? atoi(getenv("POCKET_REWIND_MB")) : 32;
   rewindBudget = (size_t)(rewindMB > 0 ? rewindMB : 32) << 20; // a bad value (negative, 0) is the default
   rewindTick = 0;
   bool menuOpen = false, leave = false;
-  struct pd_menu menu, hkMenu;
-  static char rows[M_COUNT][40], hkRows[HK_ACTIONS + 1][40];
-  static const char *rowPtrs[M_COUNT], *hkPtrs[HK_ACTIONS + 1];
-  static const char *const hkNames[HK_ACTIONS] = {"FAST FORWARD", "REWIND", "SAVE STATE", "LOAD STATE"};
-  bool hkPage = false, kbPage = false;
+  struct pd_menu menu, hkMenu, slotMenu;
+  static char rows[M_COUNT][48], hkRows[HK_ACTIONS + 1][48], slotRows[PD_STATE_SLOTS][48];
+  static const char *rowPtrs[M_COUNT], *hkPtrs[HK_ACTIONS + 1], *slotPtrs[PD_STATE_SLOTS];
+  static const char *const hkNames[HK_ACTIONS] = {"FAST FORWARD", "REWIND", "SAVE STATE", "LOAD STATE",
+                                                  "UNDO SAVE", "UNDO LOAD", "SLOT NEXT", "SLOT PREV"};
+  bool hkPage = false, kbPage = false, padPage = false, slotPage = false;
   unsigned latched = 0, menuConsumed = 0;
   bool modifierPending = false, modifierUsed = false;
   int pulseLeft = 0; // frames the modifier's own tap still reaches the game
@@ -1909,36 +2559,43 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
     }
     const unsigned menuChord = (1u << START) | (1u << SELECT);
     const bool menuChordDown = (held & menuChord) == menuChord;
-    bool menuKey = down(MENU) || (comboMenu && menuChordDown && (pressed & menuChord));
-    snprintf(rows[M_RESUME], 40, "RESUME");
-    snprintf(rows[M_SAVE], 40, "SAVE STATE");
-    snprintf(rows[M_LOAD], 40, "LOAD STATE");
+    bool menuKey = padCapture < 0 && (down(MENU) || (comboMenu && menuChordDown && (pressed & menuChord)));
+    snprintf(rows[M_RESUME], 48, "RESUME");
+    snprintf(rows[M_SAVE], 48, "SAVE STATE  SLOT %d", stateSlot);
+    snprintf(rows[M_LOAD], 48, "LOAD STATE  SLOT %d", stateSlot);
     if (hostSet.ffSpeed)
-      snprintf(rows[M_FFSPEED], 40, "FF SPEED  %dx", hostSet.ffSpeed);
+      snprintf(rows[M_FFSPEED], 48, "FF SPEED  %dx", hostSet.ffSpeed);
     else
-      snprintf(rows[M_FFSPEED], 40, "FF SPEED  MAX");
-    snprintf(rows[M_REWIND], 40, "REWIND  %s", hostSet.rewind ? "ON" : "OFF");
-    snprintf(rows[M_LCD], 40, "LCD FILTER  %s", hostSet.lcd ? "ON" : "OFF");
-    snprintf(rows[M_SWAP], 40, "A/B BUTTONS  %s", hostSet.swapAB ? "SWAPPED" : "NORMAL");
-    snprintf(rows[M_HOTKEYS], 40, "HOTKEYS");
-    snprintf(rows[M_KEYBOARD], 40, "KEYBOARD");
-    snprintf(rows[M_QUIT], 40, fromList ? "QUIT TO GAME LIST" : "QUIT");
+      snprintf(rows[M_FFSPEED], 48, "FF SPEED  MAX");
+    snprintf(rows[M_REWIND], 48, "REWIND  %s", hostSet.rewind ? "ON" : "OFF");
+    snprintf(rows[M_AUTO_RESUME], 48, "AUTO RESUME  %s", hostSet.autoResume ? "ON" : "OFF");
+    snprintf(rows[M_LCD], 48, "DISPLAY FILTER  %s", displayModeNames[hostSet.displayMode]);
+    snprintf(rows[M_SWAP], 48, "A/B BUTTONS  %s", hostSet.swapAB ? "SWAPPED" : "NORMAL");
+    snprintf(rows[M_HOTKEYS], 48, "HOTKEYS");
+    snprintf(rows[M_KEYBOARD], 48, "KEYBOARD");
+    snprintf(rows[M_CONTROLLER], 48, "CONTROLLER");
+    snprintf(rows[M_STATES], 48, "STATE SLOTS");
+    snprintf(rows[M_UNDO_SAVE], 48, "UNDO SAVE");
+    snprintf(rows[M_UNDO_LOAD], 48, "UNDO LOAD");
+    snprintf(rows[M_QUIT], 48, fromList ? "QUIT TO GAME LIST" : "QUIT");
     for (int i = 0; i < M_COUNT; i++)
       rowPtrs[i] = rows[i];
     for (int i = 0; i < HK_ACTIONS; i++) {
-      snprintf(hkRows[i], 40, "%s  %s", hkNames[i], capturing == i ? "..." : hotkey_label(hotkeys[i]));
+      snprintf(hkRows[i], 48, "%s  %s", hkNames[i], capturing == i ? "..." : hotkey_label(hotkeys[i]));
       hkPtrs[i] = hkRows[i];
     }
-    snprintf(hkRows[HK_ACTIONS], 40, "MODIFIER  %s",
+    snprintf(hkRows[HK_ACTIONS], 48, "MODIFIER  %s",
              capturing == HK_ACTIONS ? "..." : hotkey_label(hostSet.modifier));
     hkPtrs[HK_ACTIONS] = hkRows[HK_ACTIONS];
-    for (int i = 0; i < KB_COUNT; i++) {
-      const char *name = kbKeys[i] ? SDL_GetKeyName((SDL_Keycode)kbKeys[i]) : "OFF";
-      snprintf(kbRows[i], 48, "%s  %s", kbLabels[i], kbCapture == i ? "..." : name);
-      kbPtrs[i] = kbRows[i];
+    for (int i = 0; i < PD_STATE_SLOTS; i++) {
+      char path[PATH_MAX * 2 + 32];
+      bool present = state_slot_file(i + 1, path, sizeof path) && pd_state_exists(path);
+      snprintf(slotRows[i], 48, "SLOT %d  %s%s", i + 1, present ? "SAVED" : "EMPTY", stateSlot == i + 1 ? "  *" : "");
+      slotPtrs[i] = slotRows[i];
     }
     kb_menu_build();
-    menuConsumed &= held;
+    pad_menu_build();
+    menuConsumed &= (unsigned)held;
     if (inputReset || menuKey || menuChordDown) {
       modifierPending = modifierUsed = false;
       pulseLeft = 0;
@@ -1948,10 +2605,10 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
     }
     if (menuKey) {
       menuOpen = !menuOpen;
-      hkPage = false, kbPage = false;
+      hkPage = kbPage = padPage = slotPage = false;
       confirming = 0;
       capturing = -1;
-      kbCapture = -1;
+      kbCapture = padCapture = -1;
       if (menuOpen) {
         pd_menu_init(&menu, "POKEDAISY", rowPtrs, M_COUNT);
         menu.overlay = true;
@@ -1985,14 +2642,52 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
     } else
       pulseLeft = 0;
     hotkeyMask |= latched | menuConsumed;
-    if (hkFired & (1u << HK_SAVE))
-      notice(state_file(ss, true) ? "State saved" : "State save failed");
-    if (hkFired & (1u << HK_LOAD))
-      notice(!exists(ss) ? "No state saved yet" : state_file(ss, false) ? "State loaded" : "State load failed");
+    if (hkFired & (1u << HK_SAVE)) {
+      bool ok = state_save_slot(stateSlot);
+      char text[64];
+      snprintf(text, sizeof text, ok ? "State saved in slot %d" : "State save failed (slot %d)", stateSlot);
+      notice(text);
+    }
+    if (hkFired & (1u << HK_LOAD)) {
+      char path[PATH_MAX * 2 + 32];
+      bool present = state_slot_file(stateSlot, path, sizeof path) && pd_state_exists(path);
+      notice(!present ? "No state in this slot"
+                      : state_load_slot(stateSlot, sav, backups, &sramCopy) ? "State loaded" : "State load failed");
+    }
+    if (hkFired & (1u << HK_UNDO_SAVE)) {
+      char path[PATH_MAX * 2 + 32];
+      notice(state_slot_file(stateSlot, path, sizeof path) && pd_state_undo_save(path) ? "Save undone" : "Nothing to undo");
+    }
+    if (hkFired & (1u << HK_UNDO_LOAD))
+      notice(state_undo_load(sav, backups, &sramCopy) ? "Load undone" : "Nothing to undo");
+    if (hkFired & (1u << HK_SLOT_NEXT))
+      state_select(stateSlot + 1);
+    if (hkFired & (1u << HK_SLOT_PREV))
+      state_select(stateSlot - 1);
+    if (hkFired & ((1u << HK_SLOT_NEXT) | (1u << HK_SLOT_PREV))) {
+      char text[32];
+      snprintf(text, sizeof text, "State slot %d", stateSlot);
+      notice(text);
+    }
     if ((hkFired & (1u << HK_REWIND)) && !hostSet.rewind)
       notice("REWIND is off: turn it on in the menu");
     const bool menuFrame = menuOpen; // the frame that closes the menu is still the menu's
-    if (menuOpen && capturing >= 0) {
+    if (menuOpen && padCapture >= 0) {
+      if (down(B)) {
+        padCapture = -1;
+      } else if (down(SELECT)) {
+        pd_pad_clear(&padMap, padCapture);
+        host_save();
+        padCapture = -1;
+        input_mapping_reset();
+      } else if (lastPadControl >= 0) {
+        pd_pad_bind(&padMap, lastPadControl, padCapture);
+        host_save();
+        padCapture = -1;
+        input_mapping_reset();
+      }
+      padMenu.title = padCapture >= 0 ? "PRESS A BUTTON / TRIGGER" : "CONTROLLER";
+    } else if (menuOpen && capturing >= 0) {
       // The next assignable button is the hotkey (taken from any other action that had it); B cancels, SELECT = OFF.
       if (down(B))
         capturing = -1;
@@ -2037,7 +2732,7 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
         confirming = 0;
       if (down(A)) {
         if (confirmMenu.selected == 1 && confirming == M_LOAD) {
-          notice(state_file(ss, false) ? "State loaded" : "State load failed");
+          notice(state_load_slot(stateSlot, sav, backups, &sramCopy) ? "State loaded" : "State load failed");
           menuOpen = false;
         } else if (confirmMenu.selected == 1 && confirming == M_QUIT) {
           leave = true;
@@ -2057,12 +2752,11 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
         notice(capturing == HK_ACTIONS ? "SELECT: select / off   B: cancel" : "B: cancel   SELECT: off");
       }
     } else if (menuOpen && kbCapture >= 0) {
-      // The key that went down is the row's (taken from any other row that had it); B cancels, SELECT = off.
-      // On a keyboard, Escape cancels and Backspace turns the row off (else they were bound, Escape taking MENU's key).
+      // Escape cancels and Backspace turns the row off, rather than capturing the keyboard's own menu/select keys.
       if (lastKey == SDLK_ESCAPE)
-        lastKey = 0, pressed |= 1u << B;
+        lastKey = 0, pressed |= 1ull << B;
       else if (lastKey == SDLK_BACKSPACE || lastKey == SDLK_DELETE)
-        lastKey = 0, pressed |= 1u << SELECT;
+        lastKey = 0, pressed |= 1ull << SELECT;
       if (lastKey) {
         for (int i = 0; i < KB_COUNT; i++)
           if (kbKeys[i] == lastKey)
@@ -2089,15 +2783,46 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
         kbPage = false;
       if (down(A)) {
         kbCapture = kbMenu.selected;
-        held = pressed = 0; // the keys it took to get here don't assign themselves
+        held = pressed = 0;
         kbMenu.title = "PRESS A KEY";
         notice("Press a key. Esc: cancel   Backspace: off");
+      }
+    } else if (menuOpen && padPage) {
+      if (down(UP))
+        pd_menu_move(&padMenu, -1);
+      if (down(DOWN))
+        pd_menu_move(&padMenu, 1);
+      if (down(B))
+        padPage = false;
+      if (down(A)) {
+        padCapture = padMenu.selected;
+        input_mapping_reset();
+        padMenu.title = "PRESS A BUTTON / TRIGGER";
+        notice("B: cancel   SELECT: off   Left stick stays a D-pad");
+      }
+    } else if (menuOpen && slotPage) {
+      int before = slotMenu.selected;
+      if (down(UP))
+        pd_menu_move(&slotMenu, -1);
+      if (down(DOWN))
+        pd_menu_move(&slotMenu, 1);
+      if (before != slotMenu.selected) {
+        state_select(slotMenu.selected + 1);
+        state_preview_load(stateSlot);
+      }
+      if (down(B))
+        slotPage = false;
+      if (down(A)) {
+        state_select(slotMenu.selected + 1);
+        slotPage = false;
       }
     } else if (menuOpen) {
       if (down(UP))
         pd_menu_move(&menu, -1);
       if (down(DOWN))
         pd_menu_move(&menu, 1);
+      if ((menu.selected == M_SAVE || menu.selected == M_LOAD) && (down(LEFT) || down(RIGHT)))
+        state_select(stateSlot + (down(RIGHT) ? 1 : -1));
       if (down(B))
         menuOpen = false;
       if (down(A)) {
@@ -2105,13 +2830,18 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
         case M_RESUME:
           menuOpen = false;
           break;
-        case M_SAVE:
-          notice(state_file(ss, true) ? "State saved" : "State save failed");
+        case M_SAVE: {
+          bool ok = state_save_slot(stateSlot);
+          char text[64];
+          snprintf(text, sizeof text, ok ? "State saved in slot %d" : "State save failed (slot %d)", stateSlot);
+          notice(text);
           menuOpen = false;
           break;
-        case M_LOAD:
-          if (!exists(ss)) {
-            notice("No state saved yet");
+        }
+        case M_LOAD: {
+          char path[PATH_MAX * 2 + 32];
+          if (!state_slot_file(stateSlot, path, sizeof path) || !pd_state_exists(path)) {
+            notice("No state in this slot");
             menuOpen = false;
             break;
           }
@@ -2121,6 +2851,7 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
           pd_menu_init(&confirmMenu, "LOAD THE STATE?", confirmRows, 2);
           confirmMenu.overlay = true;
           break;
+        }
         case M_FFSPEED:
           hostSet.ffSpeed = hostSet.ffSpeed == 0 ? 2 : hostSet.ffSpeed >= 8 ? 0 : hostSet.ffSpeed + 1;
           host_save();
@@ -2131,24 +2862,53 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
             rewind_clear();
           host_save();
           break;
+        case M_AUTO_RESUME:
+          hostSet.autoResume = !hostSet.autoResume;
+          host_save();
+          break;
         case M_LCD:
-          hostSet.lcd = !hostSet.lcd;
+          hostSet.displayMode = (hostSet.displayMode + 1) % (POCKET_DISPLAY_SHADER_EDGE_SMOOTH + 1);
           host_save();
           break;
         case M_SWAP:
           hostSet.swapAB = swapFace = !hostSet.swapAB;
-          held = 0; // the button that chose this is now the other one: let it go
+          input_mapping_reset();
           host_save();
           break;
         case M_HOTKEYS:
-          hkPage = true, kbPage = false;
+          hkPage = true;
           pd_menu_init(&hkMenu, "HOTKEYS", hkPtrs, HK_ACTIONS + 1);
           hkMenu.overlay = true;
           break;
         case M_KEYBOARD:
-          kbPage = true, hkPage = false;
+          kbPage = true;
           kb_menu_open();
           break;
+        case M_CONTROLLER:
+          padPage = true;
+          pad_menu_open();
+          break;
+        case M_STATES:
+          slotPage = true;
+          pd_menu_init(&slotMenu, "STATE SLOTS", slotPtrs, PD_STATE_SLOTS);
+          slotMenu.selected = stateSlot - 1;
+          slotMenu.overlay = true;
+          state_preview_load(stateSlot);
+          break;
+        case M_UNDO_SAVE: {
+          char statePath[PATH_MAX * 2 + 32];
+          notice(state_slot_file(stateSlot, statePath, sizeof statePath) && pd_state_undo_save(statePath)
+                     ? "Save undone"
+                     : "Nothing to undo");
+          break;
+        }
+        case M_UNDO_LOAD: {
+          bool ok = state_undo_load(sav, backups, &sramCopy);
+          notice(ok ? "Load undone" : "Nothing to undo");
+          if (ok)
+            menuOpen = false;
+          break;
+        }
         case M_QUIT:
           confirming = M_QUIT;
           confirmRows[0] = "CANCEL";
@@ -2162,7 +2922,14 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
     if (menuFrame) {
       muted = true;
       gameKeys = 0;
-      present_game(menuOpen ? (confirming ? &confirmMenu : hkPage ? &hkMenu : kbPage ? &kbMenu : &menu) : NULL);
+      statePreviewMenu = menuOpen && slotPage;
+      present_game(menuOpen ? (confirming ? &confirmMenu
+                              : hkPage    ? &hkMenu
+                              : kbPage    ? &kbMenu
+                              : padPage   ? &padMenu
+                              : slotPage  ? &slotMenu
+                                          : &menu)
+                            : NULL);
       if (maxFrames && ++frames >= maxFrames) { // a scripted run can end, and be captured, with the menu up
         if (shot && !capture(shot))
           appError = 1;
@@ -2190,7 +2957,8 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
     pointerDown = pointerHeld || pointerPulse > 0;
     if (pointerPulse > 0)
       pointerPulse--;
-    gameKeys = joypad((held & ~hotkeyMask & ~((1u << MENU) | (1u << FFKEY) | (1u << RWKEY))) | modifierPulse);
+    unsigned gameHeld = (unsigned)held;
+    gameKeys = joypad((gameHeld & ~hotkeyMask & ~((1u << MENU) | (1u << FFKEY) | (1u << RWKEY))) | modifierPulse);
     uint64_t t = SDL_GetPerformanceCounter();
     if (rewinding) {
       muted = true;
@@ -2232,7 +3000,10 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
     }
     perf_frame(frameStart, hz);
   }
-  sram_write(sav, &sramCopy, true);
+  bool batteryOkay = sram_write(sav, &sramCopy, true);
+  if (hostSet.autoResume && batteryOkay)
+    notice(state_resume_write(sav) ? "Resume state saved" : "Resume save failed");
+  statePreviewMenu = false;
   free(sramCopy.data);
   rewind_clear();
   core.unload_game();
@@ -2243,7 +3014,7 @@ static void run_game(const char *path, int maxFrames, const char *shot, bool fro
   if (audio)
     SDL_ClearQueuedAudio(audio);
   muted = false;
-  held = pressed = 0;
+  held = pressed = padHeld = 0;
 }
 
 // By the file name, whichever folder it is in.
@@ -2252,15 +3023,15 @@ static const char *base_name(const char *p) {
   return s ? s + 1 : p;
 }
 /* ---- the library (library.c): the host's own SETTINGS rows, and its canvases and covers on the screen ---- */
-static bool libraryKeyboard; // the game list's KEYBOARD row was picked: its loop opens the page
+static bool libraryKeyboard, libraryController;
 static const char *lib_label(int row) {
-  static const char *const LABELS[] = {"LCD FILTER", "FF SPEED", "REWIND", "A/B BUTTONS", "KEYBOARD"};
+  static const char *const LABELS[] = {"DISPLAY FILTER", "FF SPEED", "REWIND", "AUTO RESUME", "A/B BUTTONS", "CONTROLLER", "KEYBOARD"};
   return LABELS[row];
 }
-static const char *lib_group(int row) { return row == 0 ? "SCREEN" : row < 3 ? "FF / SPEED" : "CONTROLS"; }
+static const char *lib_group(int row) { return row == 0 ? "SCREEN" : row < 3 ? "FF / SPEED" : row == 3 ? "SAVES" : "CONTROLS"; }
 static void lib_value(int row, char *out, int len) {
   if (row == 0)
-    snprintf(out, (size_t)len, "%s", hostSet.lcd ? "ON" : "OFF");
+    snprintf(out, (size_t)len, "%s", displayModeNames[hostSet.displayMode]);
   else if (row == 1 && hostSet.ffSpeed)
     snprintf(out, (size_t)len, "%dx", hostSet.ffSpeed);
   else if (row == 1)
@@ -2268,13 +3039,16 @@ static void lib_value(int row, char *out, int len) {
   else if (row == 2)
     snprintf(out, (size_t)len, "%s", hostSet.rewind ? "ON" : "OFF");
   else if (row == 3)
+    snprintf(out, (size_t)len, "%s", hostSet.autoResume ? "ON" : "OFF");
+  else if (row == 4)
     snprintf(out, (size_t)len, "%s", hostSet.swapAB ? "SWAPPED" : "NORMAL");
   else
     snprintf(out, (size_t)len, "EDIT");
 }
 static void lib_step(int row, int dir) {
   if (row == 0)
-    hostSet.lcd = !hostSet.lcd;
+    hostSet.displayMode = (hostSet.displayMode + dir + POCKET_DISPLAY_SHADER_EDGE_SMOOTH + 1) %
+                          (POCKET_DISPLAY_SHADER_EDGE_SMOOTH + 1);
   else if (row == 1) {
     // MAX, 2x ... 8x, round.
     int v = hostSet.ffSpeed ? hostSet.ffSpeed - 1 : 0; // 0 MAX, 1..7 = 2x..8x
@@ -2283,17 +3057,51 @@ static void lib_step(int row, int dir) {
   } else if (row == 2)
     hostSet.rewind = !hostSet.rewind;
   else if (row == 3)
+    hostSet.autoResume = !hostSet.autoResume;
+  else if (row == 4)
     hostSet.swapAB = swapFace = !hostSet.swapAB;
   else {
-    libraryKeyboard = true; // the loop opens the page over the list
+    if (row == 5)
+      libraryController = true;
+    else
+      libraryKeyboard = true;
     return;
   }
   host_save();
 }
+static void library_present(struct pd_menu *page);
+static bool save_text_edit(void *ctx, const char *hint, const char *initial, int max, char *out, size_t outLen) {
+  (void)ctx;
+  if (!initial || max < 1 || max >= (int)sizeof textPrompt.text || !out || outLen < 2)
+    return false;
+  memset(&textPrompt, 0, sizeof textPrompt);
+  textPrompt.active = true;
+  textPrompt.max = max;
+  textScript = -1;
+  snprintf(textPrompt.hint, sizeof textPrompt.hint, "%s", hint ? hint : "Name");
+  snprintf(textPrompt.text, sizeof textPrompt.text, "%s", initial);
+  out[0] = 0;
+  SDL_StartTextInput();
+  while (running && textPrompt.active) {
+    events();
+    if (textPrompt.active)
+      library_present(NULL);
+    SDL_Delay(16);
+  }
+  textPrompt.active = false;
+  SDL_StopTextInput();
+  if (textPrompt.accepted)
+    snprintf(out, outLen, "%s", textPrompt.text);
+  pressed = held = 0;
+  libraryClick = false;
+  libraryWheel = 0;
+  fprintf(stderr, "Save tools: text %s\n", textPrompt.accepted ? "accepted" : "cancelled");
+  return textPrompt.accepted && out[0];
+}
 #ifndef POCKET_VERSION
 #define POCKET_VERSION "dev"
 #endif
-static const struct lib_host libraryHost = {5, lib_label, lib_group, lib_value, lib_step, POCKET_VERSION};
+static const struct lib_host libraryHost = {7, lib_label, lib_group, lib_value, lib_step, POCKET_VERSION, save_text_edit, NULL};
 
 /* The library at a finer grain than the overlay (its 320x240 is the companion's): about 640x480 on a 1280x960 panel. Its
  * page, then the covers at the screen's own resolution, then a second canvas with the legend and the menus. */
@@ -2416,6 +3224,16 @@ static void library_present(struct pd_menu *page) {
   struct pd_canvas top;
   pd_canvas_init(&top, w, h, libraryTopPx);
   library_draw_top(&top, KEY_COLOR);
+  if (textPrompt.active) {
+    int pw = w < 280 ? w : 280, ph = 92, px = (w - pw) / 2, py = (h - ph) / 2;
+    int f = pd_title_box(&top, px, py, pw, ph, PD_TITLE_FILL);
+    pd_text_fit(&top, px + f + 8, py + f + 5, pw - 2 * f - 16, textPrompt.hint, PD_VALUE, PD_VALUE_SHADOW);
+    char typed[65];
+    snprintf(typed, sizeof typed, "%s_", textPrompt.text);
+    pd_text_fit(&top, px + f + 8, py + f + 28, pw - 2 * f - 16, typed, PD_LABEL, PD_LABEL_SHADOW);
+    pd_text_fit(&top, px + f + 8, py + ph - f - 20, pw - 2 * f - 16, "ENTER: OK   ESC: CANCEL", PD_MUTED,
+                PD_MUTED_SHADOW);
+  }
   if (!libraryTopTexture || libraryTopW != w || libraryTopH != h) {
     if (libraryTopTexture)
       SDL_DestroyTexture(libraryTopTexture);
@@ -2481,6 +3299,8 @@ int main(int argc, char **argv) {
       root = argv[++i];
     else if (!strcmp(argv[i], "--save") && i + 1 < argc)
       saveFile = argv[++i];
+    else if ((!strcmp(argv[i], "--import-save") || !strcmp(argv[i], "--restore-save")) && i + 1 < argc)
+      importFile = argv[++i];
     else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
       frames = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--shot") && i + 1 < argc)
@@ -2503,8 +3323,10 @@ int main(int argc, char **argv) {
   }
   snprintf(savesDir, sizeof savesDir, "%s/saves", root);
   snprintf(hostIni, sizeof hostIni, "%s/host.ini", root);
-  host_load();
   faceLabels = getenv("POCKET_FACE_LABELS") && !strcmp(getenv("POCKET_FACE_LABELS"), "1");
+  host_load();
+  if (getenv("POCKET_RESUME"))
+    hostSet.autoResume = strcmp(getenv("POCKET_RESUME"), "0") != 0;
   comboMenu = !(getenv("POCKET_MENU_COMBO") && !strcmp(getenv("POCKET_MENU_COMBO"), "off"));
   // A window manager can give another window the focus over the game (plorpOS's in-game menu on the GKD): the
   // controller has to keep reaching the host then.
@@ -2597,7 +3419,7 @@ int main(int argc, char **argv) {
     settings_migrate(); // before the library writes its first settings: an old DATA/settings.ini wins
     library_open(paths, count, root, savesDir, &libraryHost);
     int ticks = 0;
-    bool keyPage = false; // the KEYBOARD page over the game list
+    bool keyPage = false, controllerPage = false;
     while (running && !library_quit()) {
       events();
       repeat_directions();
@@ -2612,27 +3434,46 @@ int main(int argc, char **argv) {
       // START + SELECT (dev's quit chord) asks to close as START or Menu do.
       if ((down(START) && (held >> SELECT & 1)) || (down(SELECT) && (held >> START & 1)))
         libDown = (libDown & ~(unsigned)LIB_SELECT) | LIB_START;
-      if (keyPage) // the KEYBOARD page has the keys
+      if (keyPage || controllerPage)
         libDown = 0;
       library_keys(libDown);
       library_tick();
-      if (libraryKeyboard) {
-        libraryKeyboard = false;
-        keyPage = true;
-        kbCapture = -1;
-        kb_menu_open();
-        pressed = held = 0; // the A that opened the page isn't the page's own
-        libraryClick = false; // nor is the click that did
+      if (libraryKeyboard || libraryController) {
+        keyPage = libraryKeyboard;
+        controllerPage = libraryController;
+        libraryKeyboard = libraryController = false;
+        kbCapture = padCapture = -1;
+        if (keyPage)
+          kb_menu_open();
+        else
+          pad_menu_open();
+        pressed = held = 0;
+        libraryClick = false;
       }
-      if (keyPage) {
+      if (keyPage || controllerPage) {
         int px = 0, py = 0;
         bool onPage = libraryClick && key_page_pointer(&px, &py);
-        if (kbCapture >= 0) {
-          // The key that went down is the row's (taken from any other row that had it); SELECT turns it off.
+        struct pd_menu *page = keyPage ? &kbMenu : &padMenu;
+        int *capture = keyPage ? &kbCapture : &padCapture;
+        if (controllerPage && padCapture >= 0) {
+          if (down(B))
+            padCapture = -1;
+          else if (down(SELECT)) {
+            pd_pad_clear(&padMap, padCapture);
+            host_save();
+            padCapture = -1;
+            input_mapping_reset();
+          } else if (lastPadControl >= 0) {
+            pd_pad_bind(&padMap, lastPadControl, padCapture);
+            host_save();
+            padCapture = -1;
+            input_mapping_reset();
+          }
+        } else if (keyPage && kbCapture >= 0) {
           if (lastKey == SDLK_ESCAPE)
-            lastKey = 0, pressed |= 1u << B;
+            lastKey = 0, pressed |= 1ull << B;
           else if (lastKey == SDLK_BACKSPACE || lastKey == SDLK_DELETE)
-            lastKey = 0, pressed |= 1u << SELECT;
+            lastKey = 0, pressed |= 1ull << SELECT;
           if (lastKey) {
             for (int i = 0; i < KB_COUNT; i++)
               if (kbKeys[i] == lastKey)
@@ -2640,38 +3481,42 @@ int main(int argc, char **argv) {
             kbKeys[kbCapture] = lastKey;
             host_save();
             kbCapture = -1;
-            kbMenu.title = "KEYBOARD";
-          } else if (down(B)) { // a controller's B cancels; a keyboard's keys are the binding
+          } else if (down(B))
             kbCapture = -1;
-            kbMenu.title = "KEYBOARD";
-          } else if (down(SELECT)) {
+          else if (down(SELECT)) {
             kbKeys[kbCapture] = SDLK_UNKNOWN;
             host_save();
             kbCapture = -1;
-            kbMenu.title = "KEYBOARD";
-          } else if (libraryClick && !onPage) { // a click beside the page closes it, as the app's floating touch screen does
-            keyPage = false, kbCapture = -1, kbMenu.title = "KEYBOARD";
+          } else if (libraryClick && !onPage) {
+            keyPage = false;
+            kbCapture = -1;
           }
-        } else if (down(B) || down(MENU)) { // B or Escape closes the page
-          keyPage = false, kbCapture = -1, kbMenu.title = "KEYBOARD";
+        } else if (down(B) || down(MENU)) {
+          keyPage = controllerPage = false;
+          kbCapture = padCapture = -1;
+        } else if (down(UP) || down(DOWN)) {
+          pd_menu_move(page, down(DOWN) ? 1 : -1);
         } else if (down(A)) {
-          kbCapture = kbMenu.selected;
+          *capture = page->selected;
           pressed = held = 0;
-          kbMenu.title = "PRESS A KEY";
         } else if (onPage) {
-          // A click on a row picks it and waits for the key, as A does on the cursor.
-          pd_menu_touch(&kbMenu, px, py, true);
-          const int row = pd_menu_touch(&kbMenu, px, py, false);
+          pd_menu_touch(page, px, py, true);
+          const int row = pd_menu_touch(page, px, py, false);
           if (row >= 0) {
-            kbMenu.selected = row;
-            kbCapture = row;
+            page->selected = row;
+            *capture = row;
             pressed = held = 0;
-            kbMenu.title = "PRESS A KEY";
           }
         } else if (libraryClick) {
-          keyPage = false; // a click beside the page closes it
+          keyPage = controllerPage = false;
         }
-        kb_menu_build();
+        if (keyPage) {
+          kbMenu.title = kbCapture >= 0 ? "PRESS A KEY" : "KEYBOARD";
+          kb_menu_build();
+        } else {
+          padMenu.title = padCapture >= 0 ? "PRESS A BUTTON / TRIGGER" : "CONTROLLER";
+          pad_menu_build();
+        }
         libraryClick = false;
         libraryWheel = 0;
       } else if (libraryClick || libraryWheel) {
@@ -2695,7 +3540,7 @@ int main(int argc, char **argv) {
         libraryWheel = 0;
         library_played(picked);
       }
-      library_present(keyPage ? &kbMenu : NULL);
+      library_present(keyPage ? &kbMenu : controllerPage ? &padMenu : NULL);
       if (frames && ++ticks >= frames) {
         if (shot && !capture(shot))
           appError = 1;
@@ -2718,8 +3563,11 @@ int main(int argc, char **argv) {
     SDL_DestroyTexture(frameTexture);
   if (overlayTexture)
     SDL_DestroyTexture(overlayTexture);
-  if (lcdTexture)
-    SDL_DestroyTexture(lcdTexture);
+  display_filter_cleanup();
+  free(frameCopy);
+  frameCopy = NULL;
+  frameCopyCapacity = frameCopyStride = 0;
+  frameCopyValid = false;
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
   SDL_Quit();

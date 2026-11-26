@@ -44,29 +44,35 @@ closed. The save is DATA/saves/COMPLETE-ROM-FILENAME.sav, or, when there is none
 without its extension, the way other emulators make them (`pokeblack2.nds` reads `pokeblack2.sav`), the raw battery
 save, read into the core when the game
 opens and written back (to a temporary file, then renamed) within two seconds of the game changing it and on quit.
-States are DATA/states/ROM.ss on the GB/GBC and DS cores and ROM.armgba.ss on the armGBA core: the two can't read each
-other's. The companion's settings are the core's, in DATA/saves/pokedaisy/settings.ini (an older DATA/settings.ini is
-copied there once). The host's own are DATA/host.ini.
+There are ten numbered states per game. Slot 1 stays DATA/states/ROM.ss on GB/GBC and DS, or ROM.armgba.ss on armGBA;
+slots 2-10 add `.slotN` before `.ss`. The cores validate their own historical formats, including armGBA's older layouts.
+State writes and their callback-owned thumbnails are atomic, with one-level undo for saves and loads. Optional AUTO
+RESUME publishes a content-hashed state/battery commit only while its battery image matches; mixed or partial bundles
+are rejected. `--import-save FILE` (also `--restore-save FILE`) validates and atomically replaces a battery save after
+its normal backup, and marks stale resume data fresh. The companion's settings are the core's, in
+DATA/saves/pokedaisy/settings.ini (an older DATA/settings.ini is copied there once). The host's own are DATA/host.ini.
 
 ## Controls and display
 
-Keyboard: arrows, Z=A, X=B, Enter=Start, Backspace=Select, Q/E=L/R, 1/2=L2/R2, Tab=X, F=Y, Space=fast-forward
-(held), R=rewind (held), F2=save state, F4=load state, Escape=the host menu. The core's own controls work as on any
-frontend: X opens the companion, L3 the quick menu (each can be rebound in the companion's SETTINGS; on a keyboard,
-F, the Y key, still opens the quick menu).
+Keyboard: arrows, Z=A, X=B, Enter=Start, Backspace=Select, Q/E=L/R, 1/2=L2/R2, 3/4=L3/R3, Tab=X, F=Y, Space=fast-forward
+(held), R=rewind (held), F2=save state, F4=load state, F3=undo save, F6=undo load, brackets=previous/next state slot,
+Escape=the host menu. Every action can be rebound in KEYBOARD. The core's own controls work as on any frontend: X opens
+the companion, L3 the quick menu (each can be rebound in the companion's SETTINGS; F, the Y key, still opens it).
 
 START+SELECT (or the controller's Guide / Menu button, or Escape) opens the host menu over the game: RESUME, SAVE
-STATE, LOAD STATE, HOTKEYS, REWIND (keeps the last ~20 s while on, in a 32 MB budget: `POCKET_REWIND_MB`), FF SPEED
-(MAX, or 2x to 8x), LCD FILTER, A/B BUTTONS (NORMAL / SWAPPED: devices disagree on which physical button SDL calls A;
-SWAPPED trades A with B and X with Y on controllers) and QUIT (QUIT TO GAME LIST when the game came from the list).
-Fast-forward is the FAST FORWARD hotkey's, while it is held. `POCKET_MENU_COMBO=off` reserves START+SELECT for PortMaster's exit without opening the host menu. The game pauses while it is open.
+STATE, LOAD STATE, HOTKEYS, KEYBOARD, CONTROLLER, STATE SLOTS, UNDO SAVE, UNDO LOAD, AUTO RESUME, REWIND (keeps the
+last ~20 s while on, in a 32 MB budget: `POCKET_REWIND_MB`), FF SPEED (MAX, or 2x to 8x), DISPLAY FILTER, A/B BUTTONS
+and QUIT (QUIT TO GAME LIST when the game came from the list). DISPLAY FILTER offers OFF, LCD, SCANLINES, CRT, GBA
+COLOR and EDGE SMOOTH. LCD keeps the legacy output-space mask. Scanlines and edge smoothing use a bounded 2x core
+buffer; CRT is capped at 2x too, and SDL performs final scaling. Filters and thumbnails read the host's callback-owned
+frame copy, never SDL's write-only texture storage. The default OFF path is unchanged. Fast-forward is the FAST FORWARD
+hotkey's, while held. `POCKET_MENU_COMBO=off` reserves START+SELECT for PortMaster's exit. The game pauses in the menu.
 
-Hold SELECT and press R2 to fast-forward, or L2 to rewind when enabled. A plain SELECT tap reaches the game
-on release. In HOTKEYS you can rebind FAST FORWARD, REWIND, SAVE STATE and LOAD STATE (save and load start off).
-Pick a row, then press a shoulder, stick click, X, Y or a reported paddle. B cancels and SELECT clears the action.
-The MODIFIER row is shared by all cores. It accepts START and the same buttons as action bindings. Press SELECT
-in that row to choose SELECT or toggle the modifier off. With the modifier off, hotkeys use single buttons.
-Bindings are stored in DATA/host.ini. Fast-forward plays its sound sped up.
+Hold SELECT and press R2 to fast-forward, or L2 to rewind when enabled. A plain SELECT tap reaches the game on release.
+HOTKEYS rebinds speed, rewind, states, undo and slot switching; B cancels and SELECT clears an action. CONTROLLER
+remaps every game and host action to an SDL button or trigger with the same conflict/cancel/clear behavior. The left
+stick remains a D-pad alias and the raw TrimUI fallback keeps its fixed layout. The MODIFIER row is shared by all cores;
+with it off, hotkeys use single buttons. Bindings are stored atomically in DATA/host.ini. Fast-forward plays its sound sped up.
 
 SDL GameController mappings take priority. The right face button acts as game A; the bottom button acts as game B.
 A controller can be plugged in or pulled out while the game runs: the first one SDL has a mapping for is used, from
@@ -139,8 +145,10 @@ controls, readable display, audio, in-game saves, state load, exit and firmware 
 
 ## Tests and CI artifacts
 
-CTest runs the save-mapping and error-injection tests, the package and PortMaster launcher checks and, with
-`POCKET_TEST_CORES` set, `linux-host-test`: the real binary, headless, on original GB / GBA / DS diagnostic programs
+CTest runs the save-mapping and error-injection tests, controller/state unit and diagnostic integration tests, the standalone
+`linux-save-tools-test` and `linux-display-shader-test` modules (the latter accepts `--benchmark`), package and PortMaster
+launcher checks and, with `POCKET_TEST_CORES` set, `linux-host-test`, `linux-host-features`, `linux-save-ui-test` and
+`linux-display-host-test` (synthetic controller/state, Gen 3 editor/trade, and actual display-pixel flows): the real binary, headless, on original GB / GBA / DS diagnostic programs
 (`make_diagnostic.py` and `dsperate/make_diagnostic.py`). The GB one writes a battery-save marker, which has to reach DATA/saves and be
 backed up on the next run. The GBA and DS diagnostics fill their screens red and green. The test launches DS from
 the game list, saves a state, and checks that L2 opens the Companion. Unsupported ROM extensions are refused. The diagnostics contain no commercial ROM or game data. The companion, HUD, quick menu

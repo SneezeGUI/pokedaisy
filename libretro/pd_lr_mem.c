@@ -31,3 +31,29 @@ bool pd_lr_read_memory(void *ctx, uint32_t a, void *out, size_t n) {
     p[i] = c->busRead8(c, a + (uint32_t)i);
   return true;
 }
+
+bool pd_lr_write_memory(void *ctx, uint32_t a, const void *data, size_t n) {
+  struct mCore *c = ctx;
+  if (c->platform(c) != mPLATFORM_GBA || (a >> 24 != 0x02 && a >> 24 != 0x03))
+    return false;
+  size_t size = 0;
+  unsigned char *base = c->getMemoryBlock(c, a >> 24, &size);
+  size_t off = a & 0x00ffffffu;
+  if (!base || off > size || n > size - off)
+    return false;
+  memcpy(base + off, data, n);
+  return true;
+}
+
+bool pd_lr_write_rom(void *ctx, uint32_t a, const void *data, size_t n) {
+  struct mCore *c = ctx;
+  if (c->platform(c) != mPLATFORM_GBA || a < 0x08000000u)
+    return false;
+  size_t size = 0;
+  unsigned char *base = (unsigned char *)c->getMemoryBlock(c, 0x08, &size);
+  size_t off = (a - 0x08000000u) & 0x01ffffffu;
+  if (!base || off > size || n > size - off)
+    return false;
+  memcpy(base + off, data, n);
+  return true;
+}

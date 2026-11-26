@@ -32,6 +32,7 @@
 #include "pd_settings.h"
 #include "pd_sha1.h"
 #include "pd_style.h"
+#include "save_tools_ui.h"
 
 /* The 3DS library's art (pd_library_draw.c): the rail's icons and the flower at 24 px. */
 extern const struct pd_art LIB_ICON_GAMES, LIB_ICON_EDIT, LIB_ICON_TRADE, LIB_ICON_SETTINGS;
@@ -81,6 +82,7 @@ static bool grid = true, quit, menuOpen, closeAsk;
 static int faceColors; // BUTTON COLORS: 0 the app's (red A, yellow B, blue X, green Y), 1 green A, red B, blue X, yellow Y
 static int selected, scroll, columns = 4, menuCursor, settingsCursor, settingsScroll, toolCursor;
 static const char *picked;
+static struct pd_linux_save_tools_ui *saveTools;
 static char notice[96];
 static unsigned noticeUntil;
 static SDL_Thread *worker;
@@ -992,6 +994,48 @@ static void look_save(void) {
   pd_look_apply(NULL, &settings);
 }
 
+static void check_saves(struct game *g);
+static void say(const char *text);
+
+static void tools_settings_changed(void *unused) {
+  (void)unused;
+  look_save();
+}
+
+static void tools_close(int destination) {
+  if (!saveTools)
+    return;
+  pd_linux_save_tools_ui_destroy(saveTools);
+  saveTools = NULL;
+  fprintf(stderr, "Save tools: session closed\n");
+  library_pause(false);
+  for (int i = 0; i < gameCount; i++)
+    check_saves(&games[i]);
+  page = destination;
+  focus = F_GAMES;
+}
+
+static void tools_open(int tool) {
+  struct pd_linux_save_tools_ui_game supported[PD_LIBRARY_MAX];
+  int count = 0, unsupported = 0;
+  for (int i = 0; i < gameCount && count < PD_LIBRARY_MAX; i++) {
+    if (games[i].console == C_GBA)
+      supported[count++] = (struct pd_linux_save_tools_ui_game){games[i].path, games[i].title, games[i].size};
+    else
+      unsupported++;
+  }
+  if (unsupported)
+    fprintf(stderr, "Save tools: %d unsupported GB/DS entr%s skipped\n", unsupported, unsupported == 1 ? "y" : "ies");
+  saveTools = pd_linux_save_tools_ui_create(dataDir, savesDir, &settings, supported, count,
+                                            tool == 0 ? PD_PAGE_EDITOR : PD_PAGE_TRADE, host->version, host->edit_text,
+                                            host->edit_ctx, tools_settings_changed, NULL);
+  if (!saveTools) {
+    say("Save tools couldn't start");
+    return;
+  }
+  library_pause(true); // no cover/hash worker while the synchronous ROM/save session is open
+}
+
 static void check_saves(struct game *g) {
   char sav[PATH_MAX * 2];
   pd_save_path(savesDir, g->path, sav, sizeof sav);
@@ -1079,6 +1123,7 @@ void library_open(char *const *paths, int count, const char *data, const char *s
 }
 
 void library_close(void) {
+  tools_close(P_GAMES);
   if (worker) {
     SDL_AtomicSet(&stopWorker, 1);
     curl_kill(); // a download in flight ends now, not at its timeout
@@ -1095,6 +1140,10 @@ void library_close(void) {
 void library_pause(bool paused) { SDL_AtomicSet(&pauseWorker, paused); }
 
 void library_tick(void) {
+  if (saveTools) {
+    pd_linux_save_tools_ui_tick(saveTools);
+    return;
+  }
   bool renamed = false;
   for (int i = 0; i < gameCount; i++) {
     struct game *g = &games[i];
@@ -1265,6 +1314,10 @@ static void move_games(unsigned down) {
 void library_keys(unsigned down) {
   if (!down)
     return;
+  if (saveTools) {
+    pd_linux_save_tools_ui_keys(saveTools, down);
+    return;
+  }
   if (closeAsk) {
     if (down & (LIB_LEFT | LIB_RIGHT | LIB_UP | LIB_DOWN))
       menuCursor ^= 1;
@@ -1326,7 +1379,7 @@ void library_keys(unsigned down) {
     if (down & LIB_DOWN)
       toolCursor = 1;
     if (down & LIB_A)
-      say("Coming to the Linux version soon");
+      tools_open(toolCursor);
     if (down & LIB_LEFT)
       focus = F_RAIL, railCursor = P_TOOLS;
     if (down & LIB_B)
@@ -1400,12 +1453,21 @@ void library_keys(unsigned down) {
 }
 
 const char *library_picked(void) {
+  if (saveTools) {
+    int result = pd_linux_save_tools_ui_picked(saveTools);
+    if (result == 3)
+      say("Write or discard your changes first");
+    else if (result)
+      tools_close(result == 1 ? P_GAMES : P_TOOLS);
+    return NULL; // the portable session never launches a core itself
+  }
   const char *p = picked;
   picked = NULL;
   return p;
 }
 
-bool library_quit(void) { return quit; }
+bool library_quit(void) { return saveTools ? pd_linux_save_tools_ui_quit(saveTools) : quit; }
+bool library_confirm_close(void) { return saveTools && pd_linux_save_tools_ui_confirm_close(saveTools); }
 
 void library_played(const char *path) {
   time_t now = time(NULL);
@@ -1824,6 +1886,10 @@ static void draw_tools(struct pd_canvas *c) {
 }
 
 void library_draw(struct pd_canvas *c) {
+  if (saveTools) {
+    pd_linux_save_tools_ui_draw(saveTools, c);
+    return;
+  }
   pd_look_apply(NULL, &settings);
   backdrop(c);
   spotCount = 0;
@@ -1851,6 +1917,8 @@ void library_draw(struct pd_canvas *c) {
 }
 
 int library_covers(struct lib_cover *out, int max) {
+  if (saveTools)
+    return 0;
   int n = spotCount < max ? spotCount : max;
   memcpy(out, spots, (size_t)n * sizeof *out);
   return n;
@@ -1885,10 +1953,18 @@ static int window(struct pd_canvas *c, int x, int y, int w, int h, const char *t
   return f;
 }
 
-bool library_dimmed(void) { return menuOpen || closeAsk; }
+bool library_dimmed(void) { return !saveTools && (menuOpen || closeAsk); }
 
 void library_draw_top(struct pd_canvas *c, uint32_t clear) {
   pd_fill(c, 0, 0, c->w, c->h, clear);
+  if (saveTools) {
+    if (SDL_GetTicks() < noticeUntil) {
+      int w = pd_text_width(notice) + 24, h = 28, x = (c->w - w) / 2, y = c->h - M - h;
+      int f = pd_title_box(c, x, y, w, h, PD_TITLE_FILL);
+      pd_text(c, x + f + 8, pd_text_y(y, h), notice, PD_LABEL, PD_LABEL_SHADOW);
+    }
+    return;
+  }
   // The button legend, floating bottom right (the launcher's ButtonLegend).
   if (!menuOpen && !closeAsk) {
     static const char *const GAMES_LEGEND[][2] = {{"A", "OPEN"}, {"B", "OPTIONS"}, {"Y", "SETTINGS"}};
@@ -1963,6 +2039,10 @@ static void wheel_games(int dir) {
 }
 
 void library_pointer(int x, int y, bool click, int wheel) {
+  if (saveTools) {
+    pd_linux_save_tools_ui_pointer(saveTools, x, y, click, wheel);
+    return;
+  }
   int under = hit_under(x, y);
   const struct lib_hit *h = under >= 0 ? &libHits[under] : NULL;
 
@@ -2027,7 +2107,7 @@ void library_pointer(int x, int y, bool click, int wheel) {
     } else if (h->action == LIB_HIT_TOOL) {
       toolCursor = h->arg;
       focus = F_GAMES;
-      say("Coming to the Linux version soon");
+      tools_open(toolCursor);
     }
     return;
   }

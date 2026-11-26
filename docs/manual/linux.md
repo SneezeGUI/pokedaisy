@@ -225,9 +225,27 @@ and `HACKS`.
 
 The header's first button sorts the games by name or by when you last played them; favorites always come first.
 `SETTINGS` holds `DARK MODE`, `THEME` and `ASPECT` (shared with the companion in your games) and the program's own
-`LCD FILTER`, `FF SPEED`, `REWIND` and `A/B BUTTONS`. `BUTTON COLORS` paints the button legend like your device's
-buttons: `RED A` (the app's colours) or `GREEN A` (green A, red B, blue X, yellow Y). `TOOLS` lists the save tools that
-are coming to this version.
+`DISPLAY FILTER`, `FF SPEED`, `REWIND`, `AUTO RESUME`, `A/B BUTTONS`, `CONTROLLER` and `KEYBOARD`. The filter offers
+`OFF`, `LCD`, `SCANLINES`, `CRT`, `GBA COLOR` and `EDGE SMOOTH`. LCD keeps the legacy output mask; scanlines and
+edge smoothing use a bounded 2x core buffer, and CRT is capped at 2x rather than a full-window CPU buffer. `BUTTON COLORS` paints the button legend like your device's buttons:
+`RED A` (the app's colours) or `GREEN A` (green A, red B, blue X, yellow Y). `TOOLS` opens the save editor and
+save trading without leaving the app-style game list for normal browsing.
+
+### Save editor and trade saves
+
+`SAVE EDITOR` and `TRADE SAVES` support retail English/European FireRed, LeafGreen, Ruby, Sapphire and Emerald saves.
+Game Boy, Game Boy Color and DS saves, Japanese layouts, and expansion hacks with a different save layout are rejected
+rather than opened as if they were supported. Pick a supported GBA game with A and go back with B.
+
+In the editor, SELECT steps through POKéMON, BAG and TRAINER, L/R changes boxes or pockets, A moves or edits, Y opens
+a Pokémon's details, and X asks to write. Box names and nicknames use the SDL keyboard: Enter accepts and Escape cancels.
+In a trade, A marks a Pokémon on each side, X changes side, Y trades, and SELECT asks to write both saves.
+
+The emulator is closed while these tools run. Writes use verified backups, atomic replacement and read-back checks;
+a save changed since it was opened is rejected, and a two-save trade is rolled back if either write fails. Automatic
+resume files for affected games are marked fresh so an old state cannot overwrite edited progress. Unsaved changes ask
+for confirmation even after leaving through the pointer rail or closing the SDL window. Closing a tool discards its
+in-memory session before normal game launching resumes, and ROM headers are revalidated when it is reopened.
 
 **Covers.** A game shows the box art your firmware's scraper saved for it (EmulationStation's `images` folder beside the
 games), and your favorites and last played games from that list come along too. A game without one gets its console's
@@ -250,8 +268,11 @@ game's. If both are there, the ROM's own name wins. It's the game's own battery 
 emulator works, a RetroArch `.srm` included once it ends in `.sav`. Keep a copy of your old save somewhere else first.
 
 Before a game opens, PokeDaisy backs its save up into `saves/pokedaisy-backups` and keeps the newest 10 copies.
-Save states are in `states` and belong to the core that made them: a GBA state from another emulator, or from the
-other core, won't load.
+There are ten state slots per game. Slot 1 keeps the old `.ss` name; slots 2-10 add `.slotN` before `.ss`, with
+thumbnails and one-level undo for saving and loading. State files still belong to the core that made them: a GBA state
+from another emulator or the other core won't load. Optional `AUTO RESUME` uses a separate clean-exit state only when
+its battery image still matches. `--import-save FILE` (or `--restore-save FILE`) validates and atomically replaces a
+battery save after its normal backup, and prevents stale resume data from replacing the imported progress.
 
 ## Controls
 
@@ -261,10 +282,13 @@ as long as the firmware's controller layout is Nintendo (its default). If that f
 `A/B BUTTONS` to `SWAPPED` in the menu. If you set `A/B BUTTONS` to `SWAPPED` on ROCKNIX with an earlier version to
 get A on the button marked A, set it back to `NORMAL`. Controllers can be plugged in or pulled out while you play.
 
-On a keyboard: arrows move, Z is A, X is B, Enter is START, Backspace is SELECT, Q and E are L and R, Tab is X and F
-is Y. Hold Space to fast forward and R to rewind, F2 saves a state, F4 loads it, and Escape opens the menu. Every one
-of those keys can be changed in the menu's `KEYBOARD` page, or in the game list's `SETTINGS` > `KEYBOARD` before you start a game. A mouse or a touch screen reaches the companion and the HUD:
-clicking a tab, the gear, a row or a button presses it, as `ENTER` on it would.
+On a keyboard: arrows move, Z is A, X is B, Enter is START, Backspace is SELECT, Q and E are L and R, 1 and 2 are
+L2 and R2, 3 and 4 are L3 and R3, Tab is X and F is Y. Hold Space to fast forward and R to rewind. F2 saves a state,
+F4 loads it, F3 undoes a save, F6 undoes a load, the brackets select the previous/next slot, and Escape opens the menu.
+Every action can be changed in `KEYBOARD`, or in the game list's `SETTINGS` before you start a game. `CONTROLLER` offers
+the same actions on SDL buttons and triggers; a conflicting binding moves off its old control, B cancels and SELECT
+clears. The left stick stays a D-pad alias. A mouse or a touch screen reaches the companion and the HUD: clicking a tab,
+the gear, a row or a button presses it, as `ENTER` on it would.
 
 The companion and the quick menu work as in the cores everywhere: X opens the [companion](companion.md), L3 opens the
 quick menu over the game (PC, FLY, the keep-away spray, BIKE, WILD ENCOUNTERS, COMPANION), and both buttons can be
@@ -308,12 +332,15 @@ pauses while it's open.
 | Row | What it does |
 | --- | --- |
 | `RESUME` | Back to the game. |
-| `SAVE STATE`, `LOAD STATE` | One save state for the game. `LOAD STATE` asks first. Game Boy Advance states made before this version don't load. |
-| `HOTKEYS` | Buttons for fast-forward, rewind and states (below). |
-| `KEYBOARD` | Which key does what (below). |
+| `SAVE STATE`, `LOAD STATE` | Uses the selected of ten slots; Left/Right changes it. `LOAD STATE` asks first. Older incompatible GBA states don't load. |
+| `HOTKEYS` | Buttons for speed, rewind, states, undo and slot switching. |
+| `KEYBOARD`, `CONTROLLER` | Which key or controller control does what. |
+| `STATE SLOTS` | Choose a slot and see its thumbnail. |
+| `UNDO SAVE`, `UNDO LOAD` | Restore the slot's previous contents, or the live state from before the last load. |
+| `AUTO RESUME` | Save a separate state on clean exit and resume only while its battery image matches. |
 | `REWIND` | `ON` keeps the last 20 seconds or so to rewind through. |
 | `FF SPEED` | How fast fast-forward goes: `MAX`, or 2x to 8x. |
-| `LCD FILTER` | A screen texture like a handheld's. |
+| `DISPLAY FILTER` | `OFF`, `LCD`, `SCANLINES`, `CRT`, `GBA COLOR` or `EDGE SMOOTH`, processed at source size (CRT at most 2x). |
 | `A/B BUTTONS` | `NORMAL` or `SWAPPED`, for devices whose A and B are the other way round. |
 | `QUIT` | Leave the game (`QUIT TO GAME LIST` when you picked it from the list). It asks first. |
 
@@ -325,6 +352,7 @@ button each:
 - `FAST FORWARD`: the game runs fast while you hold SELECT and the button. R2 to start with.
 - `REWIND`: the game runs backwards while you hold SELECT and the button, with `REWIND` set to `ON`. L2 to start with.
 - `SAVE STATE` and `LOAD STATE`: one press each, with SELECT held. Off to start with.
+- `UNDO SAVE`, `UNDO LOAD`, `SLOT NEXT` and `SLOT PREV`: one press each. Off to start with.
 - `MODIFIER`: the button you hold for the hotkeys. SELECT to start with. Press START or a hotkey button to use that
   instead, or press SELECT to turn it off; then each hotkey is its button alone, and that button never reaches the game.
 
@@ -345,8 +373,8 @@ the key you want. Escape or B cancels, and Backspace or SELECT turns that row of
 keys are kept in `host.ini` in the data folder, so they stay as you set them.
 
 The keys it starts with are the ones above: Z for A, X for B, Enter for START, Backspace for SELECT, the arrows for
-the D-pad, Q and E for L1 and R1, Tab for X, F for Y, 1 and 2 for L2 and R2, Escape for MENU, Space for fast forward,
-R for rewind, F2 for saving a state and F4 for loading it.
+the D-pad, Q and E for L1 and R1, 1 and 2 for L2 and R2, 3 and 4 for L3 and R3, Tab for X, F for Y, Escape for MENU,
+Space for fast forward, R for rewind, F2/F4 for save/load, F3/F6 for undo save/load, and brackets for the state slots.
 
 While you pick a key the game doesn't see it, so Escape doesn't open the menu again and Enter doesn't press START.
 

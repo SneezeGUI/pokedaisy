@@ -201,21 +201,37 @@ upside down / rotated in Azahar, so don't go back to them without checking on ha
 
 `pokedaisy-linux` (`linux/main.c`) is an SDL2 **libretro frontend** for Linux desktops and handhelds (Steam Deck,
 TrimUI, PortMaster): it links no emulator and loads the core for the ROM from beside itself - `pokedaisy_gba_libretro.so`
-(`.gba`, armGBA, `libretro/armgba/`) or `pokedaisy_gbc_libretro.so` (`.gb` / `.gbc`, mGBA, `libretro/`; `POCKET_CORE_DIR` to
-move them) - so the companion, HUD, quick menu, FLY / PC / REPEL / BIKE, WILD ENCOUNTERS and EXPAND are the cores' own and
+(`.gba`, armGBA, `libretro/armgba/`), `pokedaisy_gbc_libretro.so` (`.gb` / `.gbc`, mGBA, `libretro/`) or
+`pokedaisy_ds_libretro.so` (`.nds`, DSperate, `linux/libretro-ds/`; `POCKET_CORE_DIR` to move them) - so the companion, HUD,
+quick menu, FLY / PC / REPEL / BIKE, WILD ENCOUNTERS and EXPAND are the cores' own and
 never drift from them (the old host carried its own copy of each and fell behind; replaced 2026-11-10). The shared C
 those cores build - `linux/hud.c`, `quick_menu.c`, `fly.c`, `field_items.c`, `wild.c`, `3ds/core/` (the 3DS port's companion,
 so a companion change for 3DS shows in the cores too) - stays in `linux/`. The host tells the core the screen (its
 `pokedaisy_panel` option, any `WxH`; the core picks its canvas: the companion, the DS core's too, at the largest whole scale that
 leaves it 320x240, like Android's ~240-270 font pixels a screen; 341x256 for the DS without a panel) and shows the frame at a whole scale, and owns what a frontend
-owns: input (keyboard, SDL controllers with hotplug and mappings from `DATA/gamecontrollerdb.txt` / `SDL_GAMECONTROLLERCONFIG`,
-the TrimUI raw fallback, the HOTKEYS page's buttons, the touch screen / mouse as RETRO_DEVICE_POINTER), sound
-(resampled to keep ~60 ms queued), pacing (the screen at 58-62 Hz, else a timer), the battery save (`DATA/saves/<rom>.sav`,
-written back when it changes, backed up before a game opens: newest 10 distinct), states (`DATA/states/<rom>.ss`, armGBA's
-`.armgba.ss`), fast-forward (sound sped up), rewind (XOR deltas from the newest state in a byte budget), the LCD mask and the game
-list, with a host menu on START+SELECT / Guide / Escape (`DATA/host.ini`; its HOTKEYS page: FF / rewind / state buttons, `hk_*`). It answers the core's GET_THROTTLE_STATE so EXPAND
-stays sharp in FF. `linux-host-test` (`test_host.py`, with `-DPOCKET_TEST_CORES=<dir>`) runs the real binary headless on the
-diagnostic ROMs over both cores. `package.py --core` ships the cores beside the binary (`--portmaster`: the PortMaster layout).
+owns: input (keyboard and SDL controller remapping, trigger axes, hotplug and mappings from `DATA/gamecontrollerdb.txt` /
+`SDL_GAMECONTROLLERCONFIG`, the TrimUI raw fallback, HOTKEYS plus the KEYBOARD / CONTROLLER pages in `host_input.c`, and the
+touch screen / mouse as RETRO_DEVICE_POINTER), sound (resampled to keep ~60 ms queued), pacing (the screen at 58-62 Hz, else
+a timer), the battery save (`DATA/saves/<rom>.sav`, written back when it changes, backed up before a game opens: newest 10
+distinct), ten numbered state slots with thumbnails and atomic writes (`host_state.c`; slot 1 stays `DATA/states/<rom>.ss`,
+armGBA's `.armgba.ss`, later slots insert `.slotN`), save / load undo, content-checked AUTO RESUME and save import,
+fast-forward (sound sped up), rewind (XOR deltas from the newest state in a byte budget), display filters (`display_shader.c`:
+OFF / LCD / SCANLINES / CRT / GBA COLOR / EDGE SMOOTH) and the game list, with a host menu on START+SELECT / Guide / Escape
+(`DATA/host.ini`; `hk_*`, keyboard and controller bindings). The library's TOOLS embeds the Gen 3 save editor / trader
+(`save_tools.c`, `save_tools_ui.c`) with verified backups, stale-file rejection, rollback and resume invalidation. It answers
+the core's GET_THROTTLE_STATE so EXPAND stays sharp in FF. `package.py --core` ships the cores beside the binary
+(`--portmaster`: the PortMaster layout).
+
+The desktop-parity core work adds `pd_center.*` / `pd_party.*` under `3ds/core/` and `pd_lr_gameplay.*` / `pd_lr_mem.*`
+under `libretro/`: Center services, party switching, delayed trade evolution, queued game calls, battle actions, reusable
+TMs / instant text and Nuzlocke persistence. Their no-ROM gate is `core_gameplay_test` (`ctest -L synthetic`; optional
+retail-ROM configuration is in `libretro/test/README.md`). With `-DPOCKET_TEST_CORES=<dir>` naming all three cores, the
+host has 14 CTest entries: the original I/O / WILD / package / launcher / diagnostic tests plus `linux-input-test`,
+`linux-state-test`, `linux-display-shader-test`, `linux-save-tools-test`, `linux-host-test`, `linux-host-features`,
+`linux-save-ui-test` and `linux-display-host-test`; `make -C 3ds test-host-display test-dex test-stats` and the DS core's
+CTest cover the shared code. `docs/LINUX_HANDOFF.md` has the published-branch and later-WIP handoff, exact build /
+test commands including clean-armGBA reproduction, data migration, recorded evidence and the controller / sanitizer /
+Windows / gameplay / Android-parity limits.
 CI (`.github/workflows/linux.yml`): x86_64 on Ubuntu 22.04 (glibc <= 2.35: SteamOS), AArch64 host + mGBA core on the TrimUI
 toolchain (GCC 8.3), the armGBA core on Ubuntu 22.04's cross GCC (8.3 can't build it), every aarch64 core failing CI if it needs a
 glibc past 2.33 (the Brick; `libretro/armgba/glibc_compat.*` pins armGBA's to 2.17). The DS experiment hook (`pd_ds_run`) is kept.

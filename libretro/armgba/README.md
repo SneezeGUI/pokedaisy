@@ -4,7 +4,11 @@
 quick menu, EXPAND, FLY / PC / REPEL / BIKE, the wild-encounter switch, RUN INDOORS), with the Game Boy Advance run by
 [armGBA](https://github.com/MagnominusGit/armGBA) (a recompiler) instead of mGBA. On the Brick (Cortex-A53, FireRed, EXPAND
 on) a frame takes 4.2 ms against 7.1 ms. Game Boy and Game Boy Color games are not on this core: armGBA runs them on
-Gambatte (GPL-2.0 only, not linkable into this GPL-3.0 work), so they stay on `pokedaisy_gbc_libretro.so`: a release ships the two cores side by side, one per job.
+Gambatte (GPL-2.0 only, not linkable into this GPL-3.0 work), so they stay on `pokedaisy_gbc_libretro.so`. Linux releases
+ship three cores side by side: this armGBA core for GBA, the mGBA core for GB/GBC and `pokedaisy_ds_libretro.so` for DS.
+The DS core comes from `linux/libretro-ds/`, separately from the older opt-in SDL-host experiment in `linux/dsperate/`.
+For the combined build, test commands and current development limits, see the
+[Linux desktop parity handoff](../../docs/LINUX_HANDOFF.md).
 
 ## How it is built
 - `cmake -S libretro/armgba -B build -DCMAKE_TOOLCHAIN_FILE=libretro/aarch64.cmake`, target `pokedaisy_gba_libretro`, which writes `pokedaisy_gba_libretro.so`.

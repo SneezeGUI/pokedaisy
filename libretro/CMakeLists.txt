@@ -26,9 +26,9 @@ get_target_property(MGBA_INC mgba_libretro INCLUDE_DIRECTORIES)
 list(FILTER MGBA_SRC EXCLUDE REGEX "platform/libretro/libretro\\.c$") # pd_libretro.c includes it, renamed
 set(APP ${CMAKE_CURRENT_SOURCE_DIR}/../app/src/main/cpp)
 file(GLOB PD_CORE CONFIGURE_DEPENDS ../3ds/core/*.c)
-add_library(pokedaisy_gbc_libretro SHARED ${MGBA_SRC} pd_libretro.c pd_lr_mem.c ${PD_CORE}
-  ../linux/hud.c ../linux/quick_menu.c ../linux/fly.c ../linux/flight.c ../linux/flash.c ../linux/field_items.c ../linux/wild.c ../linux/gb_field.c
-  ../linux/polished_field.c
+add_library(pokedaisy_gbc_libretro SHARED ${MGBA_SRC} pd_libretro.c pd_lr_mem.c pd_lr_gameplay.c ${PD_CORE}
+  ../linux/hud.c ../linux/quick_menu.c ../linux/fly.c ../linux/flight.c ../linux/flash.c ../linux/field_items.c ../linux/tm_teach.c ../linux/wild.c ../linux/gb_field.c
+  ../linux/polished_field.c ../3ds/host/pd_items.c ../3ds/host/pd_rom_options.c
   pd_flight_area.c ${APP}/pk_call.c ${APP}/pk_flight.c ${APP}/pk_wide.c ${APP}/pk_wide_gb.c ${APP}/pk_gb_field.c)
 set_source_files_properties(${APP}/pk_wide.c ${APP}/pk_wide_gb.c PROPERTIES COMPILE_OPTIONS -Wno-unused-parameter)
 # The launcher core draws a Game Boy game's margins off the field as a glow; the app keeps plain bars (pk_wide_gb.c).
@@ -46,3 +46,21 @@ endif()
 add_executable(gb_field_test EXCLUDE_FROM_ALL test/gb_field_test.c)
 set_target_properties(gb_field_test PROPERTIES COMPILE_DEFINITIONS "${MGBA_DEFS};${MGBA_DIR_DEFS};_GNU_SOURCE")
 target_include_directories(gb_field_test PRIVATE ${MGBA_INC} ${MGBA}/include ${CMAKE_CURRENT_BINARY_DIR}/mgba/include ${MGBA}/src ../3ds/core ../linux ${APP})
+
+enable_testing()
+add_executable(core_gameplay_test test/core_gameplay_test.c pd_lr_gameplay.c ${PD_CORE}
+  ../3ds/host/pd_items.c ../3ds/host/pd_rom_options.c ../linux/field_items.c ../linux/tm_teach.c ${MGBA}/src/util/crc32.c)
+target_include_directories(core_gameplay_test PRIVATE ${MGBA_INC} ${MGBA}/include ${CMAKE_CURRENT_BINARY_DIR}/mgba/include ${MGBA}/src ../3ds/core ../linux ${APP})
+target_compile_options(core_gameplay_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(core_gameplay_test PRIVATE m)
+add_test(NAME core-gameplay COMMAND core_gameplay_test)
+set_tests_properties(core-gameplay PROPERTIES LABELS synthetic)
+
+# Optional retail-ROM checks, documented in test/README.md. Empty arguments skip a missing cart.
+set(PD_FIRERED_ROM "" CACHE FILEPATH "Optional retail FireRed rev 1 ROM for core-gameplay-retail")
+set(PD_EMERALD_ROM "" CACHE FILEPATH "Optional retail Emerald ROM for core-gameplay-retail")
+set(PD_UNBOUND_ROM "" CACHE FILEPATH "Optional Unbound ROM for core-gameplay-retail")
+if(PD_FIRERED_ROM OR PD_EMERALD_ROM OR PD_UNBOUND_ROM)
+  add_test(NAME core-gameplay-retail COMMAND core_gameplay_test "${PD_FIRERED_ROM}" "${PD_EMERALD_ROM}" "${PD_UNBOUND_ROM}")
+  set_tests_properties(core-gameplay-retail PROPERTIES LABELS retail)
+endif()

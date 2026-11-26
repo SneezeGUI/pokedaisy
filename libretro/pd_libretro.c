@@ -16,6 +16,8 @@
 #include "gb_field.h"
 #include "polished_field.h"
 #include "pd_binput.h"
+#include "pd_lr_gameplay.h"
+#include "pd_lr_mem.h"
 #include "polished_action_data.h"
 #include "hud.h"
 #include "pd_env.h"
@@ -764,7 +766,7 @@ static int gbTake;
 static bool gbWildHeld;
 static size_t romLen;
 static bool polishedActions;
-static struct pd_binput polishedInput;
+static struct pd_lr_gameplay gameplay;
 
 static int polished_byte(uint32_t addr) {
   uint8_t v = 0;
@@ -781,8 +783,8 @@ static void polished_open_pc(void) {
 }
 
 static void polished_use(int item) {
-  if (!pd_binput_field_start(&polishedInput, PD_FIELD_USE, item, 0))
-    notice(pd_field_input_message(&polishedInput.field));
+  if (!pd_binput_field_start(&gameplay.input, PD_FIELD_USE, item, 0))
+    notice(pd_field_input_message(&gameplay.input.field));
 }
 
 static bool polished_potion(int item) {
@@ -791,6 +793,8 @@ static bool polished_potion(int item) {
 
 
 static void snapshot(void) { pd_snapshot_read(&snap, &game, pd_lr_read_memory, core); }
+static void gameplay_notice(void *ctx, const char *text) { (void)ctx; notice(text); }
+static void gameplay_snapshot(void *ctx) { (void)ctx; snapshot(); }
 
 /* pk_flight told the profile's words with FLY ON's vehicle (again only when it changed). */
 static void flight_configure_words(void) {
@@ -1521,10 +1525,6 @@ RETRO_API bool retro_load_game(const struct retro_game_info *g) {
     ovScratch = calloc((size_t)CANVAS_MAX_W * CANVAS_MAX_H, sizeof *ovScratch);
   pd_ui_init(&ui, &settings);
   ui.handheldDex = ui.handheldParty = ui.guideController = ui.shoulderTabs = true;
-  if (polishedActions) {
-    pd_binput_init(&polishedInput, &game, pd_lr_read_memory, NULL, core);
-    ui.battleInput = &polishedInput;
-  }
   memset(&host, 0, sizeof host);
   host.hideScreenMode = true;
   host.hasQuickMenu = true;
@@ -1537,8 +1537,18 @@ RETRO_API bool retro_load_game(const struct retro_game_info *g) {
   host.hasCoreRows = true; // AUTO-RUN, DARK MODE, RESET SETTINGS
   host.hasFlightArea = freeFlight;
   host.flightSupported = freeFlight; // FLY STYLE / FLIGHT AREA / FLY ON (SCENIC needs scenic_ok, else classic)
-  host.itemCanUse = polishedActions ? polished_potion : NULL;
   host.expandGame = wideSupported;
+  const struct pd_lr_gameplay_env gameplayEnv = {
+      .core = core, .game = &game, .settings = &settings, .ui = &ui, .snap = &snap, .host = &host,
+      .rom = romData, .romSize = romLen, .romCrc = crc, .dataDir = *pdDir ? pdDir : NULL,
+      .gba = PD_BE_IS_GBA(), .wideKnown = wideSupported, .fieldKnown = fieldKnown,
+      .fieldFlags = &fieldFlags, .companion = &companion,
+      .read = pd_lr_read_memory, .write = pd_lr_write_memory, .romWrite = pd_lr_write_rom, .memoryCtx = core,
+      .notice = gameplay_notice, .snapshot = gameplay_snapshot,
+  };
+  pd_lr_gameplay_init(&gameplay, &gameplayEnv, polishedActions);
+  if (polishedActions)
+    host.itemCanUse = polished_potion;
   host.count = 1;
   host.labels[0] = "HOST";
   snprintf(host.values[0], 40, "PokeDaisy core");
@@ -1569,10 +1579,7 @@ static void layer_jump(void) {
   gameKeyFrames = 0;
   shortcutExclusive = false;
   shortcutBlocked = polishedActions ? held : 0;
-  if (polishedActions) {
-    pd_binput_init(&polishedInput, &game, pd_lr_read_memory, NULL, core);
-    ui.battleChoosingMove = ui.battleChoosingMon = false;
-  }
+  pd_lr_gameplay_jump(&gameplay, polishedActions);
   gbWildHeld = gbf != NULL; // a state taken while OFF carries the held rates: put back once when ON
 }
 
@@ -1794,11 +1801,11 @@ RETRO_API void retro_run(void) {
   PD_BE_INPUT_POLL();
   poll_keys();
   shortcutBlocked &= held;
-  const bool fieldRunning = polishedActions && polishedInput.field.result == PD_FIELD_RUNNING;
-  const bool inputRunning = polishedActions && pd_binput_exclusive(&polishedInput);
+  const bool fieldRunning = polishedActions && gameplay.input.field.result == PD_FIELD_RUNNING;
+  const bool inputRunning = gameplay.battleActions && pd_binput_exclusive(&gameplay.input);
   if (fieldRunning && down(B)) {
-    pd_binput_cancel(&polishedInput);
-    notice(pd_field_input_message(&polishedInput.field));
+    pd_binput_cancel(&gameplay.input);
+    notice(pd_field_input_message(&gameplay.input.field));
   }
   const bool airborne = freeFlight && pk_flight_state() != PK_FLIGHT_IDLE;
   if (inputRunning || airborne)
@@ -1997,8 +2004,8 @@ RETRO_API void retro_run(void) {
       if (polishedActions) {
         quickOpen = false;
         shortcutBlocked |= held; // the A that picked it stays out of the game
-        if (!pd_binput_field_start(&polishedInput, PD_FIELD_FLY, 0, 0))
-          notice(pd_field_input_message(&polishedInput.field));
+        if (!pd_binput_field_start(&gameplay.input, PD_FIELD_FLY, 0, 0))
+          notice(pd_field_input_message(&gameplay.input.field));
       } else
         flyAsk = 1; // answered below, between two frames
     } else if (down(A) && !quick[quickSel].why && quick[quickSel].action == QUICK_REPEL && repelKindCount > 1) {
@@ -2093,11 +2100,11 @@ RETRO_API void retro_run(void) {
       const char *why = pd_field_input_reason(game.sha1, pd_lr_read_memory, core);
       if (why)
         notice(why);
-      else if (pd_binput_field_start(&polishedInput, ui.bagSelected >= 0 ? PD_FIELD_ITEM : PD_FIELD_BAG,
+      else if (pd_binput_field_start(&gameplay.input, ui.bagSelected >= 0 ? PD_FIELD_ITEM : PD_FIELD_BAG,
                                     ui.bagItemShown, 0))
         companion = false;
       else
-        notice(pd_field_input_message(&polishedInput.field));
+        notice(pd_field_input_message(&gameplay.input.field));
     } else if (mapHandled) {
       if (closeMap) companion = false;
     } else if (backing && ui.tab == PD_TAB_BAG && ui.bagTabs && ui.overlay == PD_OVERLAY_NONE) {
@@ -2171,6 +2178,7 @@ RETRO_API void retro_run(void) {
         }
       } else if (partySummary) {
         pd_ui_party_summary_control(&ui, &snap, down(RIGHT) - down(LEFT), down(DOWN) - down(UP), down(A), down(SELECT));
+        focusId = ui.focusId;
       } else if (bag_browsing(&ui)) {
         if (down(SELECT)) {
           pd_ui_bag_cycle_sort(&ui);
@@ -2198,7 +2206,12 @@ RETRO_API void retro_run(void) {
         }
       }
     }
-    switch (pd_ui_take_action(&ui)) {
+    enum pd_action action = pd_ui_take_action(&ui);
+    if (PD_BE_IS_GBA() && action == PD_ACTION_SETTINGS_CHANGED)
+      pd_lr_gameplay_action(&gameplay, action);
+    else if (PD_BE_IS_GBA() && pd_lr_gameplay_action(&gameplay, action))
+      action = PD_ACTION_NONE;
+    switch (action) {
     case PD_ACTION_ITEM_PICK:
       if (polishedActions && polished_potion(ui.itemId) && !ui.itemGive) {
         const char *why = pd_field_input_reason(game.sha1, pd_lr_read_memory, core);
@@ -2219,7 +2232,7 @@ RETRO_API void retro_run(void) {
       break;
     case PD_ACTION_ITEM_APPLY:
       if (polishedActions && !pd_field_input_reason(game.sha1, pd_lr_read_memory, core) &&
-          pd_binput_field_start(&polishedInput, PD_FIELD_HEAL, ui.itemId, ui.itemSlot))
+          pd_binput_field_start(&gameplay.input, PD_FIELD_HEAL, ui.itemId, ui.itemSlot))
         companion = false;
       else if (polishedActions)
         notice("Potion unavailable");
@@ -2261,7 +2274,7 @@ RETRO_API void retro_run(void) {
       ff = false;
     rewinding = got && th.mode == RETRO_THROTTLE_REWINDING;
   }
-  if (polishedActions && companion && pd_binput_busy(&polishedInput))
+  if (gameplay.battleActions && companion && pd_binput_busy(&gameplay.input))
     companion = false; // The native battle / Bag / party resumes with the selected action.
   bool paused = companion || hudFocus || (quickOpen && !flyAsk);
   const bool expanded = wideSupported && settings.aspect != PD_ASPECT_ORIGINAL;
@@ -2282,13 +2295,13 @@ RETRO_API void retro_run(void) {
       pd_settings_save(&settings, settingsPath);
       notice("Wild encounters restored");
     }
-    const bool fieldStarted = polishedActions && polishedInput.field.result == PD_FIELD_RUNNING;
-    if (polishedActions) {
+    const bool fieldStarted = polishedActions && gameplay.input.field.result == PD_FIELD_RUNNING;
+    if (gameplay.battleActions) {
       if (rewinding)
-        pd_binput_cancel(&polishedInput);
+        pd_binput_cancel(&gameplay.input);
       else
-        shortcutKeys = pd_binput_tick(&polishedInput, &shortcutExclusive);
-      shortcutExclusive |= inputRunning || (!rewinding && (shortcutKeys || pd_binput_exclusive(&polishedInput)));
+        shortcutKeys = pd_binput_tick(&gameplay.input, &shortcutExclusive);
+      shortcutExclusive |= inputRunning || (!rewinding && (shortcutKeys || pd_binput_exclusive(&gameplay.input)));
       if (rewinding)
         shortcutKeys = 0;
       if (shortcutExclusive)
@@ -2306,8 +2319,8 @@ RETRO_API void retro_run(void) {
     if (freeFlight)
       pk_flight_tick(core);
     PF_T(pb);
-    if (fieldStarted && polishedInput.field.result != PD_FIELD_RUNNING && polishedInput.field.result != PD_FIELD_CANCELLED) {
-      notice(pd_field_input_message(&polishedInput.field));
+    if (fieldStarted && gameplay.input.field.result != PD_FIELD_RUNNING && gameplay.input.field.result != PD_FIELD_CANCELLED) {
+      notice(pd_field_input_message(&gameplay.input.field));
       snapshot();
     }
     pf_add(PF_RUN, pb - pa);
@@ -2339,8 +2352,10 @@ RETRO_API void retro_run(void) {
     PD_BE_AUDIO(silence, 549);
   }
 
-  if (!snap.valid || (companion && !wasCompanion) || (!companion && frames % 30 == 0))
+  if (!snap.valid || (companion && !wasCompanion))
     snapshot();
+  pd_lr_gameplay_frame(&gameplay, frames);
+  pd_lr_gameplay_jobs(&gameplay);
   companionWas = companion;
   frames++;
 
@@ -2532,6 +2547,7 @@ RETRO_API void retro_run(void) {
     host.hasState = false;
     host.flightReady = freeFlight && fly_flyer(&snap) >= 0; // MAP's TAKE OFF / LAND
     host.flying = freeFlight && pk_flight_state() != PK_FLIGHT_IDLE;
+    pd_lr_gameplay_sync_host(&gameplay);
     memset(cvs, 0, (size_t)CW * CH * sizeof *cvs);
     // Use the Dex's compact font throughout the GBC Companion. Restore the cart font for the in-game HUD.
     const bool gen2 = game.cfg && game.cfg->gb && game.cfg->gb->gen == 2;

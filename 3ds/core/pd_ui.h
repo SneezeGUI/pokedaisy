@@ -173,7 +173,16 @@ enum pd_action {
     PD_ACTION_TRADE_EVOLVE, // the summary's EVOLVE (TRADE EVOS): party slot ui.summarySlot evolves as a trade would
     PD_ACTION_NUZLOCKE_TOGGLE, // SETTINGS' NUZLOCKE / the tab's TURN ON: this game's tracking on or off
     PD_ACTION_NUZLOCKE_EDIT,   // the NUZLOCKE tab changed the run: ui.nuzEdit / nuzEditArg
+    PD_ACTION_CENTER_HEAL,
+    PD_ACTION_CENTER_NICKNAME,
+    PD_ACTION_CENTER_FORGET, // ui.centerMove is the move slot
+    PD_ACTION_CENTER_RELEARN,
 };
+
+#define PD_CENTER_HEAL 1u
+#define PD_CENTER_NICKNAME 2u
+#define PD_CENTER_FORGET 4u
+#define PD_CENTER_RELEARN 8u
 
 // A party slot in USE / GIVE's pick: dimmed, or which of its moves it would help.
 struct pd_item_slot {
@@ -218,6 +227,8 @@ struct pd_host_info {
     bool fullSettings;  // Optional: SETTINGS' groups and the rows the 3DS has
     bool wildSupported, fieldSupported; // WILD ENCOUNTERS / the field read works on this game
     bool hasCoreRows;    // the compact list adds AUTO-RUN (with fieldSupported), DARK MODE and RESET SETTINGS (the libretro cores)
+    bool hasGameplayRows; // the compact list also adds supported game patches, TRADE EVOS and NUZLOCKE
+    unsigned centerServices; // PD_CENTER_*: the summary's working POKéMON CENTER services
     int batteryPct;     // -1 = unknown
     bool charging;      // the battery is charging (a bolt by it)
     bool flyReady;      // MAP's FLY button: someone in the party can
@@ -278,6 +289,9 @@ enum pd_overlay {
     PD_OVERLAY_NUZ_PICK,      // NUZLOCKE: an encounter's outcome by hand
     PD_OVERLAY_NUZ_CONFIRM,   // NUZLOCKE: FAINTED? / BRING BACK? / NEW RUN?
     PD_OVERLAY_PICK_LANGUAGE, // LANGUAGE: AUTO, then the languages
+    PD_OVERLAY_CENTER,
+    PD_OVERLAY_CENTER_FORGET,
+    PD_OVERLAY_CONFIRM_FORGET,
 };
 
 // Optional presentation data for another emulator; IDs stay native to that backend.
@@ -484,6 +498,9 @@ struct pd_ui {
     bool summaryCanSwitch; // ... offered (set by the party tab from the host)
     int switchFrom, switchTo; // PD_ACTION_PARTY_SWAP's slots
     bool summaryEvolve;       // the summary's EVOLVE (TRADE EVOS): its Pokémon evolves by trading now
+    unsigned centerServices;  // the host's PD_CENTER_* bits while the summary is drawn
+    int centerMove;           // FORGET's picked move slot
+    int centerMoveSlots[PD_NUM_MOVES], centerMoveCount;
     bool viewExpand; // VIEW's pick-list offers EXPAND (this game can)
     // ZOOM's steps for this game (hosts with zoomCount > 1), copied from the host for the pick-list.
     int zoomCount;

@@ -538,7 +538,7 @@ bool ui_summary_learn(struct pd_ui* ui) {
 }
 
 static void act(struct pd_ui* ui, int id) {
-    if (ui_map_act(ui, id) || ui_dex_act(ui, id) || ui_nuzlocke_act(ui, id) || ui_guide_act(ui, id) || ui_battle_act(ui, id) || ui_card_act(ui, id) ||
+    if (ui_center_act(ui, id) || ui_map_act(ui, id) || ui_dex_act(ui, id) || ui_nuzlocke_act(ui, id) || ui_guide_act(ui, id) || ui_battle_act(ui, id) || ui_card_act(ui, id) ||
         ui_battle_controls_act(ui, id, ui->drawn) || ui_states_act(ui, id) || ui_boxes_act(ui, id, ui->drawn) ||
         ui_bag_act(ui, id, ui->drawn)) {
         return;
@@ -657,6 +657,7 @@ static void act(struct pd_ui* ui, int id) {
         ui->action = PD_ACTION_TRADE_EVOLVE;
     } else if (id == HIT_SUMMARY_SWITCH) {
         ui->summarySwitching = true;
+        ui->focusId = HIT_SLOT;
     } else if (id == HIT_SWITCH_CANCEL) {
         ui->summarySwitching = false;
     } else if (ui->summarySwitching && id >= HIT_SLOT && id < HIT_SLOT + PD_PARTY_SIZE) {

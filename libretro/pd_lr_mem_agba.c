@@ -3,6 +3,7 @@
  * cartridge are what the companion reads; anything else says no. GPL-3.0, see ../NOTICE. */
 #include "core.h"
 #include "gba.h"
+#include "cpu/jit.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -36,5 +37,33 @@ bool pd_lr_read_memory(void *ctx, uint32_t a, void *out, size_t n) {
   if (!base || off > size || n > size - off)
     return false;
   memcpy(out, base + off, n);
+  return true;
+}
+
+bool pd_lr_write_memory(void *ctx, uint32_t a, const void *data, size_t n) {
+  (void)ctx;
+  if (!gba || (a >> 24 != 0x02 && a >> 24 != 0x03))
+    return false;
+  const uint8_t *bytes = data;
+  for (size_t i = 0; i < n; i++)
+    memoryStore8(gba, a + (uint32_t)i, bytes[i], NULL);
+  uint8_t check[16];
+  for (size_t i = 0; i < n; i += sizeof check) {
+    size_t part = n - i < sizeof check ? n - i : sizeof check;
+    if (!pd_lr_read_memory(ctx, a + (uint32_t)i, check, part) || memcmp(check, bytes + i, part))
+      return false;
+  }
+  return true;
+}
+
+bool pd_lr_write_rom(void *ctx, uint32_t a, const void *data, size_t n) {
+  (void)ctx;
+  if (!gba || a < 0x08000000u)
+    return false;
+  size_t off = a & 0x01ffffffu;
+  if (!gba->rom || off > gba->romSize || n > gba->romSize - off)
+    return false;
+  memcpy(gba->rom + off, data, n);
+  jitStateLoaded(gba, false);
   return true;
 }

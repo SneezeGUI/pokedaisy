@@ -11,10 +11,14 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <direct.h>
+#include <fcntl.h>
 #include <io.h>
 #include <limits.h>
+#include <process.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
 #include <windows.h>
 
@@ -26,6 +30,26 @@
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0 // a handle belongs to this process alone anyway
 #endif
+#ifndef O_DIRECTORY
+#define O_DIRECTORY 0
+#endif
+#ifndef NAME_MAX
+#define NAME_MAX 255
+#endif
+#define getpid _getpid
+#define lstat stat
+#define fchmod(fd, mode) 0
+
+/* The save adapter is synchronous, so a shared seek/read/restore is enough for POSIX pread. */
+static inline ssize_t pd_pread(int fd, void *buf, size_t size, off_t offset) {
+  __int64 old = _lseeki64(fd, 0, SEEK_CUR);
+  if (old < 0 || _lseeki64(fd, offset, SEEK_SET) < 0)
+    return -1;
+  ssize_t result = _read(fd, buf, (unsigned int)size);
+  _lseeki64(fd, old, SEEK_SET);
+  return result;
+}
+#define pread pd_pread
 
 /* Time broken down the POSIX way (Windows spells it _s, with the arguments the other way round). */
 static inline struct tm *pd_localtime_r(const time_t *t, struct tm *out) {

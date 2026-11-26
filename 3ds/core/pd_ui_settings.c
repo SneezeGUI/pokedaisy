@@ -407,11 +407,22 @@ void ui_settings_tab(struct pd_ui* ui, struct pd_canvas* c, const struct pd_game
         setting(ui, c, ix, &y, iw, SETTING_ONE_TAP, "ONE-TAP MOVES", st->oneTapMoves ? "ON" : "OFF");
         setting(ui, c, ix, &y, iw, SETTING_BATTLE_STYLE, "BATTLE STYLE", st->battleGen5 ? "GEN 5" : "GEN 4");
     }
-    // A host without the groups (the libretro cores): AUTO-RUN and DARK MODE here, the full list has them in GAMEPLAY
-    // and by THEME.
+    // A host without the groups (the libretro cores): AUTO-RUN and DARK MODE here, then its supported gameplay rows;
+    // the full list has them in GAMEPLAY and by THEME.
     if (!full && host && host->hasCoreRows) {
         if (host->fieldSupported) setting(ui, c, ix, &y, iw, SETTING_AUTO_RUN, "AUTO-RUN", st->autoRun ? "ON" : "OFF");
         setting(ui, c, ix, &y, iw, SETTING_DARK, "DARK MODE", st->darkMode ? "ON" : "OFF");
+    }
+    if (!full && host && host->hasGameplayRows) {
+        if (host->tmsSupported == 1)
+            setting(ui, c, ix, &y, iw, SETTING_REUSABLE_TMS, "REUSABLE TMS", st->reusableTms ? "ON" : "OFF");
+        else if (host->tmsSupported == 2) muted_row(c, ix, &y, iw, "REUSABLE TMS", "ON");
+        if (host->textSupported)
+            setting(ui, c, ix, &y, iw, SETTING_INSTANT_TEXT, "INSTANT TEXT", st->instantText ? "ON" : "OFF");
+        if (host->tradeEvoSupported)
+            setting(ui, c, ix, &y, iw, SETTING_TRADE_EVOS, "TRADE EVOS", st->tradeEvos ? "ON" : "OFF");
+        if (host->nuzlockeSupported)
+            setting(ui, c, ix, &y, iw, SETTING_NUZLOCKE, "NUZLOCKE", host->nuzlockeOn ? "ON" : "OFF");
     }
     snprintf(buf, sizeof(buf), pd_tr("%d TABS"), ui_bar_count(ui));
     setting(ui, c, ix, &y, iw, SETTING_TAB_BAR, "TAB BAR", buf);
@@ -652,6 +663,14 @@ static void confirm(struct pd_ui* ui, struct pd_canvas* c, const char* title, co
     ui_button(ui, c, c->w / 2 + 6, y, bw, 24, "CANCEL", HIT_NO);
 }
 
+void ui_pick_list(struct pd_ui* ui, struct pd_canvas* c, const char* title, const char* const* options, int n, int current) {
+    pick_list(ui, c, title, options, n, current);
+}
+
+void ui_confirm(struct pd_ui* ui, struct pd_canvas* c, const char* title, const char* text, const char* yes) {
+    confirm(ui, c, title, text, yes);
+}
+
 void ui_overlay(struct pd_ui* ui, struct pd_canvas* c) {
     if (ui->overlay == PD_OVERLAY_NONE) return;
     pd_dim(c, 0xE6);
@@ -741,6 +760,11 @@ void ui_overlay(struct pd_ui* ui, struct pd_canvas* c) {
         break;
     case PD_OVERLAY_CONFIRM_RESTART:
         confirm(ui, c, "RESTART GAME", "Start the game again from its save? Anything since the last save is lost.", "RESTART");
+        break;
+    case PD_OVERLAY_CENTER:
+    case PD_OVERLAY_CENTER_FORGET:
+    case PD_OVERLAY_CONFIRM_FORGET:
+        ui_center_overlay(ui, c);
         break;
     default:
         break;
