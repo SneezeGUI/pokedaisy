@@ -329,8 +329,10 @@ only: no games, ROMs or game content are sold or handed out.
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-A Linux build for handhelds (SDL2, the same mGBA core and the 3DS port's companion) is in early
-testing: [linux/README.md](linux/README.md).
+A Linux build for desktops and handhelds is in early testing: an SDL2 frontend and three libretro
+cores (armGBA for GBA, mGBA for GB/GBC and DSperate for DS), using the 3DS port's shared companion
+code. See [linux/README.md](linux/README.md). The [Linux desktop parity handoff](docs/LINUX_HANDOFF.md)
+has the current developer setup, verification evidence and known limitations.
 
 <details>
 <summary><strong>AI tooling note</strong></summary>
