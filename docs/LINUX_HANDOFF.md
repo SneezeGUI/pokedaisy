@@ -216,10 +216,10 @@ This includes layout policy, the enhanced libretro contract in both pixel format
 ### Shared portable-core tests
 
 ```sh
-make -C 3ds test-host-display test-dex test-stats
+make -C 3ds test-host-display test-dex test-stats test-tr
 ```
 
-These use the repository's public fixtures. They are the shared display, dex and stats checks wired into the libretro workflow, not the complete 3DS or Android test suites.
+These use the repository's public fixtures. They cover shared display, dex and stats behavior, and `test-tr` verifies that generated translations are current. They are checks wired into the native workflows, not the complete 3DS or Android test suites. Run `python3 3ds/tools/gen_tr.py` when player-facing portable-core labels change, review the generated diff, and keep `test-tr` in the gate.
 
 ## Complete Release host test run
 
@@ -441,7 +441,7 @@ The next useful validation order is: resolve or isolate the leaks, validate the 
    Resolve conflicts without discarding the Linux modules. Once the branch is published, use fast-forward-only pulls from its fork branch. Do not force-push over another developer's work.
 4. **Refresh only the required submodules.** Run the two submodule update commands from the setup section after changing revisions. Inspect `git submodule status`, then run the separate inner-armGBA revision, status and diff checks. Superproject status alone can hide the 3DS patch. If needed, reverse exactly that patch with the checked procedure above.
 5. **Rebuild as one revision.** Rerun the GBC, GBA, DS and host commands above, replace all three files in `build/cores` together, and reconfigure the host with `POCKET_TEST_CORES`. For toolchain, CMake-option or armGBA-patch changes, use fresh build directory names instead of mixing old objects. Do not mix cores from different source revisions or clean/patched armGBA configurations in one package.
-6. **Run the focused gates.** Run synthetic core tests, DS CTest, shared `test-host-display test-dex test-stats`, export checks and the full 14-entry Release host suite. Add optional retail coverage only with your own ROMs. Follow the repository rule to ask before full Android or whole-project suites.
+6. **Run the focused gates.** Run synthetic core tests, DS CTest, shared `test-host-display test-dex test-stats test-tr`, export checks and the full 14-entry Release host suite. Add optional retail coverage only with your own ROMs. Follow the repository rule to ask before full Android or whole-project suites.
 7. **Smoke the packaged result.** Use a new package output directory, inspect the zip, install into a separate directory and start with a disposable data folder. Only then point it at migrated real data. Keep the previous application and data backups until battery saves, states and controls are confirmed.
 8. **Update documentation with behavior changes.** Player-visible Linux changes belong in `docs/manual/linux.md` in the same change. If `docs/manual/linux-install.md` changes, regenerate its install guides with `node website/scripts/install-guides.mjs`. The website and manual checks require Node 22.23.4 or newer and the locked website dependencies. After installing Node with nvm or a local Node distribution, run:
 

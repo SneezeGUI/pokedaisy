@@ -63,6 +63,8 @@ This is a plan only. It does not open pull requests or substitute integration-le
   by a slice.
 - The inspected integration diff does not change `gamedata/` or the generated wide and flight tables. Do not add generated-file
   churn to these slices unless the source data actually changes.
+- Player-facing portable-core labels also require `python3 3ds/tools/gen_tr.py`, a reviewed `3ds/core/pd_tr_gen.c` diff, and
+  `make -C 3ds test-tr`. A feature branch is not ready while the generated translation check reports that `pd_tr_gen.c` is stale.
 
 ### Tests and platform claims
 
